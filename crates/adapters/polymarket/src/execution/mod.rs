@@ -86,6 +86,7 @@ use crate::{
     filters::InstrumentFilter,
     http::{
         clob::PolymarketClobHttpClient,
+        data_api::PolymarketDataApiHttpClient,
         gamma::PolymarketGammaHttpClient,
         query::{CancelResponse, GetBalanceAllowanceParams, GetTradesParams, OrderResponse},
     },
@@ -106,6 +107,7 @@ pub struct PolymarketExecutionClient {
     config: PolymarketExecClientConfig,
     emitter: ExecutionEventEmitter,
     http_client: PolymarketClobHttpClient,
+    data_api_client: PolymarketDataApiHttpClient,
     submitter: OrderSubmitter,
     ws_client: PolymarketWebSocketClient,
     provider: PolymarketInstrumentProvider,
@@ -187,6 +189,10 @@ impl PolymarketExecutionClient {
         .context("failed to create Gamma HTTP client")?;
         let provider = PolymarketInstrumentProvider::new(gamma_http);
 
+        let data_api_client = PolymarketDataApiHttpClient::new(config.base_url_data_api.clone(), Some(config.http_timeout_secs))
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to create Data API HTTP client")?;
+
         let clock = get_atomic_clock_realtime();
         let usdc = get_usdc_currency();
         let emitter = ExecutionEventEmitter::new(
@@ -203,6 +209,7 @@ impl PolymarketExecutionClient {
             config,
             emitter,
             http_client,
+            data_api_client,
             submitter,
             ws_client,
             provider,
@@ -367,6 +374,18 @@ impl PolymarketExecutionClient {
                                 None,
                             );
                             report.price = Some(price);
+
+                            if time_in_force == TimeInForce::Gtd {
+                                if let Some(exp_str) = &order.expiration {
+                                    if let Ok(secs) = exp_str.parse::<u64>() {
+                                        if secs > 0 {
+                                            report = report.with_expire_time(
+                                                UnixNanos::from(secs * 1_000_000_000),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
 
                             let is_accepted = fill_tracker.contains(&venue_order_id);
                             if is_accepted {
@@ -1332,9 +1351,19 @@ impl ExecutionClient for PolymarketExecutionClient {
 
     async fn generate_position_status_reports(
         &self,
-        _cmd: &GeneratePositionStatusReports,
+        cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        Ok(vec![])
+        let ctx = self.fill_context();
+        let ts_init = self.clock.get_time_ns();
+        let reports = reconciliation::generate_position_status_reports(
+            &self.data_api_client,
+            &self.provider,
+            &ctx,
+            cmd.instrument_id,
+            ts_init,
+        )
+        .await;
+        Ok(reports)
     }
 
     async fn generate_mass_status(
@@ -1344,6 +1373,7 @@ impl ExecutionClient for PolymarketExecutionClient {
         let ctx = self.fill_context();
         reconciliation::generate_mass_status(
             &self.http_client,
+            &self.data_api_client,
             &self.provider,
             &ctx,
             self.core.client_id,

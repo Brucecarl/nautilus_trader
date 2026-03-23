@@ -125,6 +125,7 @@ fn create_test_exec_config(addr: SocketAddr) -> PolymarketExecClientConfig {
         base_url_http: Some(format!("http://{addr}")),
         base_url_ws: Some(format!("ws://{addr}/ws")),
         base_url_gamma: Some(format!("http://{addr}")),
+        base_url_data_api: Some(format!("http://{addr}")),
         http_timeout_secs: 5,
         max_retries: 0,
         ..PolymarketExecClientConfig::default()
@@ -199,6 +200,11 @@ async fn handle_get_order(State(state): State<TestServerState>) -> Response {
 async fn handle_get_trades(State(state): State<TestServerState>) -> Response {
     *state.last_path.lock().await = "/data/trades".to_string();
     Json(load_json("http_trades_page.json")).into_response()
+}
+
+async fn handle_get_positions(State(state): State<TestServerState>) -> Response {
+    *state.last_path.lock().await = "/positions".to_string();
+    Json(load_json("data_api_positions_response.json")).into_response()
 }
 
 async fn handle_get_balance(State(state): State<TestServerState>) -> Response {
@@ -288,6 +294,7 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/data/orders", get(handle_get_orders))
         .route("/data/order/{id}", get(handle_get_order))
         .route("/data/trades", get(handle_get_trades))
+        .route("/positions", get(handle_get_positions))
         .route("/balance-allowance", get(handle_get_balance))
         .route(
             "/order",
@@ -418,7 +425,7 @@ async fn test_generate_fill_reports_empty_without_instruments() {
 
 #[rstest]
 #[tokio::test]
-async fn test_generate_position_status_reports_always_empty() {
+async fn test_generate_position_status_reports_empty_when_no_instruments_loaded() {
     let state = TestServerState::default();
     let addr = start_mock_server(state).await;
     let (client, _rx, _cache) = create_test_execution_client(addr);
@@ -436,7 +443,7 @@ async fn test_generate_position_status_reports_always_empty() {
 
     let reports = client.generate_position_status_reports(&cmd).await.unwrap();
 
-    // Polymarket has no position endpoint
+    // Data API returns positions but none match loaded instruments (provider cache empty)
     assert!(reports.is_empty());
 }
 

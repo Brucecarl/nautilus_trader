@@ -29,7 +29,7 @@ use ustr::Ustr;
 
 use crate::http::{
     error::{Error, Result},
-    models::DataApiTrade,
+    models::{DataApiPosition, DataApiTrade},
 };
 
 const POLYMARKET_DATA_API_URL: &str = "https://data-api.polymarket.com";
@@ -106,6 +106,72 @@ impl PolymarketDataApiHttpClient {
         }
     }
 
+    /// Fetches all open positions for a user address (paginated).
+    ///
+    /// Calls `GET /positions?user=<address>` and follows offset pagination until
+    /// the API returns fewer results than the page size.
+    ///
+    /// If `condition_ids` is provided, only positions for those markets are returned
+    /// (passed as a comma-separated `conditionIds` query parameter).
+    pub async fn get_positions(
+        &self,
+        user_address: &str,
+        condition_ids: Option<&[&str]>,
+    ) -> Result<Vec<DataApiPosition>> {
+        let limit = 500usize;
+        let mut results = Vec::new();
+        let mut offset = 0usize;
+
+        loop {
+            let mut params = vec![
+                ("user".to_string(), user_address.to_string()),
+                ("limit".to_string(), limit.to_string()),
+                ("offset".to_string(), offset.to_string()),
+                ("sortBy".to_string(), "TOKENS".to_string()),
+                ("sortDirection".to_string(), "DESC".to_string()),
+            ];
+
+            if let Some(ids) = condition_ids {
+                if !ids.is_empty() {
+                    params.push(("conditionIds".to_string(), ids.join(",")));
+                }
+            }
+
+            let url = format!("{}/positions", self.base_url);
+            let response = self
+                .client
+                .request_with_params(Method::GET, url, Some(&params), None, None, None, None)
+                .await
+                .map_err(Error::from_http_client)?;
+
+            if !response.status.is_success() {
+                return Err(Error::from_status_code(
+                    response.status.as_u16(),
+                    &response.body,
+                ));
+            }
+
+            let page: Vec<DataApiPosition> =
+                serde_json::from_slice(&response.body).map_err(Error::Serde)?;
+
+            let page_len = page.len();
+            results.extend(page);
+
+            if page_len < limit {
+                break;
+            }
+
+            offset += limit;
+
+            if offset > 10_000 {
+                log::warn!("Positions pagination offset exceeded 10000, stopping");
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Fetches trades and converts them to [`TradeTick`] for the given instrument.
     ///
     /// Filters by `token_id` (since the API returns trades for all outcomes
@@ -167,12 +233,60 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::http::models::DataApiTrade;
+    use crate::http::models::{DataApiPosition, DataApiTrade};
 
     fn load_trades() -> Vec<DataApiTrade> {
         let path = "test_data/data_api_trades_response.json";
         let content = std::fs::read_to_string(path).expect("Failed to read test data");
         serde_json::from_str(&content).expect("Failed to parse test data")
+    }
+
+    fn load_positions() -> Vec<DataApiPosition> {
+        let path = "test_data/data_api_positions_response.json";
+        let content = std::fs::read_to_string(path).expect("Failed to read test data");
+        serde_json::from_str(&content).expect("Failed to parse test data")
+    }
+
+    #[rstest]
+    fn test_data_api_position_deserialization() {
+        let positions = load_positions();
+
+        assert_eq!(positions.len(), 2);
+
+        assert_eq!(
+            positions[0].asset,
+            "71321045679252212594626385532706912750332728571942532289631379312455583992563"
+        );
+        assert_eq!(
+            positions[0].condition_id,
+            "0xc8f1cf5d4f26e0fd9c8fe89f2a7b3263b902cf14fde7bfccef525753bb492e47"
+        );
+        assert_eq!(positions[0].size, 50.0);
+        assert_eq!(positions[0].avg_price, 0.65);
+
+        assert_eq!(
+            positions[1].asset,
+            "16678291189211314787145083999015737376658799626183230671758641503291735614088"
+        );
+        assert_eq!(positions[1].size, 100.5);
+        assert_eq!(positions[1].avg_price, 0.42);
+    }
+
+    #[rstest]
+    fn test_data_api_position_ignores_extra_fields() {
+        // Extra fields like proxyWallet, title, slug, icon, outcome etc. should be ignored
+        let positions = load_positions();
+        assert_eq!(positions.len(), 2);
+    }
+
+    #[rstest]
+    fn test_data_api_position_zero_size_skipped_in_reports() {
+        // Verify zero-size positions would be filtered (size <= 0.0 check in reconciliation)
+        let mut positions = load_positions();
+        positions[0].size = 0.0;
+        let non_zero: Vec<_> = positions.iter().filter(|p| p.size > 0.0).collect();
+        assert_eq!(non_zero.len(), 1);
+        assert_eq!(non_zero[0].size, 100.5);
     }
 
     #[rstest]

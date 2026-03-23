@@ -323,6 +323,23 @@ pub struct DataApiTrade {
     pub transaction_hash: String,
 }
 
+/// A user position returned by `GET /positions` on the Polymarket Data API.
+///
+/// References: <https://docs.polymarket.com/#get-positions>
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataApiPosition {
+    /// The ERC-1155 token ID (YES or NO outcome token).
+    pub asset: String,
+    /// The condition ID (hex string) for the market.
+    pub condition_id: String,
+    /// Current token quantity held (decimal shares, e.g. `50.0`).
+    pub size: f64,
+    /// Average entry price in USDC (e.g. `0.65`).
+    #[serde(default)]
+    pub avg_price: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

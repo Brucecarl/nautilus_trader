@@ -138,6 +138,17 @@ pub fn parse_order_status_report(
         None, // report_id
     );
     report.price = Some(price);
+
+    if time_in_force == TimeInForce::Gtd {
+        if let Some(exp_str) = &order.expiration {
+            if let Ok(secs) = exp_str.parse::<u64>() {
+                if secs > 0 {
+                    report = report.with_expire_time(UnixNanos::from(secs * 1_000_000_000));
+                }
+            }
+        }
+    }
+
     report
 }
 
