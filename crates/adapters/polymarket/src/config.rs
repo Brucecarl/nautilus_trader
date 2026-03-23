@@ -46,12 +46,7 @@ pub struct PolymarketDataClientConfig {
     pub ws_max_subscriptions: usize,
     /// Instrument reload interval in minutes.
     pub update_instruments_interval_mins: Option<u64>,
-    /// Whether to subscribe to new market discovery events via WebSocket.
-    pub subscribe_new_markets: bool,
-    /// Instrument filters applied to all instruments during loading and discovery.
     pub filters: Vec<Arc<dyn InstrumentFilter>>,
-    /// Optional filter applied to newly discovered markets before instrument emission.
-    pub new_market_filter: Option<Arc<dyn InstrumentFilter>>,
 }
 
 impl Clone for PolymarketDataClientConfig {
@@ -65,9 +60,7 @@ impl Clone for PolymarketDataClientConfig {
             ws_timeout_secs: self.ws_timeout_secs,
             ws_max_subscriptions: self.ws_max_subscriptions,
             update_instruments_interval_mins: self.update_instruments_interval_mins,
-            subscribe_new_markets: self.subscribe_new_markets,
             filters: self.filters.clone(),
-            new_market_filter: self.new_market_filter.clone(),
         }
     }
 }
@@ -86,9 +79,7 @@ impl Debug for PolymarketDataClientConfig {
                 "update_instruments_interval_mins",
                 &self.update_instruments_interval_mins,
             )
-            .field("subscribe_new_markets", &self.subscribe_new_markets)
             .field("filters", &self.filters)
-            .field("new_market_filter", &self.new_market_filter)
             .finish()
     }
 }
@@ -104,9 +95,7 @@ impl Default for PolymarketDataClientConfig {
             ws_timeout_secs: Some(30),
             ws_max_subscriptions: crate::common::consts::WS_DEFAULT_SUBSCRIPTIONS,
             update_instruments_interval_mins: Some(60),
-            subscribe_new_markets: false,
             filters: Vec::new(),
-            new_market_filter: None,
         }
     }
 }
@@ -142,7 +131,7 @@ impl PolymarketDataClientConfig {
     pub fn data_api_url(&self) -> String {
         self.base_url_data_api
             .clone()
-            .unwrap_or_else(|| "https://data-api.polymarket.com".to_string())
+            .unwrap_or_else(|| urls::data_api_url().to_string())
     }
 }
 
@@ -174,12 +163,15 @@ pub struct PolymarketExecClientConfig {
     pub signature_type: SignatureType,
     pub base_url_http: Option<String>,
     pub base_url_ws: Option<String>,
+    pub base_url_gamma: Option<String>,
+    pub base_url_data_api: Option<String>,
     pub http_timeout_secs: u64,
     pub max_retries: u32,
     pub retry_delay_initial_ms: u64,
     pub retry_delay_max_ms: u64,
     /// Timeout waiting for WS order acknowledgment (seconds).
     pub ack_timeout_secs: u64,
+    pub filters: Vec<Arc<dyn InstrumentFilter>>,
 }
 
 impl Clone for PolymarketExecClientConfig {
@@ -195,11 +187,14 @@ impl Clone for PolymarketExecClientConfig {
             signature_type: self.signature_type,
             base_url_http: self.base_url_http.clone(),
             base_url_ws: self.base_url_ws.clone(),
+            base_url_gamma: self.base_url_gamma.clone(),
+            base_url_data_api: self.base_url_data_api.clone(),
             http_timeout_secs: self.http_timeout_secs,
             max_retries: self.max_retries,
             retry_delay_initial_ms: self.retry_delay_initial_ms,
             retry_delay_max_ms: self.retry_delay_max_ms,
             ack_timeout_secs: self.ack_timeout_secs,
+            filters: self.filters.clone(),
         }
     }
 }
@@ -217,11 +212,14 @@ impl Debug for PolymarketExecClientConfig {
             .field("signature_type", &self.signature_type)
             .field("base_url_http", &self.base_url_http)
             .field("base_url_ws", &self.base_url_ws)
+            .field("base_url_gamma", &self.base_url_gamma)
+            .field("base_url_data_api", &self.base_url_data_api)
             .field("http_timeout_secs", &self.http_timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("retry_delay_initial_ms", &self.retry_delay_initial_ms)
             .field("retry_delay_max_ms", &self.retry_delay_max_ms)
             .field("ack_timeout_secs", &self.ack_timeout_secs)
+            .field("filters", &self.filters)
             .finish()
     }
 }
@@ -239,11 +237,14 @@ impl Default for PolymarketExecClientConfig {
             signature_type: SignatureType::Eoa,
             base_url_http: None,
             base_url_ws: None,
+            base_url_gamma: None,
+            base_url_data_api: None,
             http_timeout_secs: 60,
             max_retries: 3,
             retry_delay_initial_ms: 1000,
             retry_delay_max_ms: 10000,
             ack_timeout_secs: 5,
+            filters: Vec::new(),
         }
     }
 }
@@ -277,5 +278,12 @@ impl PolymarketExecClientConfig {
         self.base_url_ws
             .clone()
             .unwrap_or_else(|| urls::clob_ws_url().to_string())
+    }
+
+    #[must_use]
+    pub fn gamma_url(&self) -> String {
+        self.base_url_gamma
+            .clone()
+            .unwrap_or_else(|| urls::gamma_api_url().to_string())
     }
 }

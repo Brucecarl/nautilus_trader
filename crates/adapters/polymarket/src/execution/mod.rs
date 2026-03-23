@@ -79,8 +79,11 @@ use crate::{
     config::PolymarketExecClientConfig,
     http::{
         clob::PolymarketClobHttpClient,
+        data_api::PolymarketDataApiHttpClient,
+        gamma::PolymarketGammaHttpClient,
         query::{CancelResponse, GetBalanceAllowanceParams, GetTradesParams, OrderResponse},
     },
+    providers::PolymarketInstrumentProvider,
     signing::eip712::OrderSigner,
     websocket::{
         client::PolymarketWebSocketClient,
@@ -97,6 +100,8 @@ pub struct PolymarketExecutionClient {
     config: PolymarketExecClientConfig,
     emitter: ExecutionEventEmitter,
     http_client: PolymarketClobHttpClient,
+    data_api_client: PolymarketDataApiHttpClient,
+    provider: PolymarketInstrumentProvider,
     submitter: OrderSubmitter,
     ws_client: PolymarketWebSocketClient,
     secrets: Secrets,
@@ -171,6 +176,25 @@ impl PolymarketExecutionClient {
             secrets.credential.clone(),
         );
 
+        let gamma_retry_config = RetryConfig {
+            max_retries: config.max_retries,
+            initial_delay_ms: config.retry_delay_initial_ms,
+            max_delay_ms: config.retry_delay_max_ms,
+            backoff_factor: 2.0,
+            jitter_ms: 1_000,
+            operation_timeout_ms: Some(config.http_timeout_secs * 1_000),
+            immediate_first: false,
+            max_elapsed_ms: Some(180_000),
+        };
+        let gamma_http = PolymarketGammaHttpClient::new(None, Some(config.http_timeout_secs), gamma_retry_config)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to create Gamma HTTP client")?;
+        let provider = PolymarketInstrumentProvider::new(gamma_http);
+
+        let data_api_client = PolymarketDataApiHttpClient::new(None, Some(config.http_timeout_secs))
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to create Data API HTTP client")?;
+
         let clock = get_atomic_clock_realtime();
         let usdc = get_usdc_currency();
         let emitter = ExecutionEventEmitter::new(
@@ -187,6 +211,8 @@ impl PolymarketExecutionClient {
             config,
             emitter,
             http_client,
+            data_api_client,
+            provider,
             submitter,
             ws_client,
             secrets,
@@ -1227,9 +1253,19 @@ impl ExecutionClient for PolymarketExecutionClient {
 
     async fn generate_position_status_reports(
         &self,
-        _cmd: &GeneratePositionStatusReports,
+        cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        Ok(vec![])
+        let ctx = self.fill_context();
+        let ts_init = self.clock.get_time_ns();
+        let reports = reconciliation::generate_position_status_reports(
+            &self.data_api_client,
+            &self.provider,
+            &ctx,
+            cmd.instrument_id,
+            ts_init,
+        )
+        .await;
+        Ok(reports)
     }
 
     async fn generate_mass_status(
@@ -1239,7 +1275,8 @@ impl ExecutionClient for PolymarketExecutionClient {
         let ctx = self.fill_context();
         reconciliation::generate_mass_status(
             &self.http_client,
-            &self.shared_token_instruments,
+            &self.data_api_client,
+            &self.provider,
             &ctx,
             self.core.client_id,
             self.core.venue,

@@ -18,11 +18,11 @@
 use anyhow::Context;
 use nautilus_core::{UnixNanos, collections::AtomicMap, time::AtomicTime};
 use nautilus_model::{
-    enums::LiquiditySide,
+    enums::{LiquiditySide, PositionSideSpecified},
     identifiers::{AccountId, ClientId, InstrumentId, Venue, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
-    types::Currency,
+    types::{Currency, Quantity},
 };
 use ustr::Ustr;
 
@@ -203,7 +203,8 @@ pub(crate) fn apply_fill_filters(
 /// Full reconciliation mass status generation.
 pub(crate) async fn generate_mass_status(
     http_client: &PolymarketClobHttpClient,
-    instruments: &AtomicMap<Ustr, InstrumentAny>,
+    data_api_client: &crate::http::data_api::PolymarketDataApiHttpClient,
+    provider: &PolymarketInstrumentProvider,
     ctx: &FillContext<'_>,
     client_id: ClientId,
     venue: Venue,
@@ -229,8 +230,9 @@ pub(crate) async fn generate_mass_status(
     let (mut fill_reports, fills_filtered) =
         build_fill_reports_from_trades(&trades, ctx, instruments, None, ts_init);
 
-    // Position reports: empty for cash/prediction markets
-    let position_reports: Vec<PositionStatusReport> = vec![];
+    // Fetch YES/NO token holdings as position reports via Data API (single call)
+    let position_reports =
+        generate_position_status_reports(data_api_client, provider, ctx, None, ts_init).await;
 
     // Apply lookback filter
     if let Some(mins) = lookback_mins {
@@ -273,4 +275,80 @@ pub(crate) async fn generate_mass_status(
     mass_status.add_fill_reports(fill_reports);
 
     Ok(Some(mass_status))
+}
+
+/// Fetches YES/NO token holdings via `GET /positions` on the Polymarket Data API
+/// and converts them into [`PositionStatusReport`]s.
+///
+/// One paginated API call returns all positions — no per-token loops.
+/// Positions not in the provider's instrument cache are skipped.
+pub(crate) async fn generate_position_status_reports(
+    data_api_client: &crate::http::data_api::PolymarketDataApiHttpClient,
+    provider: &PolymarketInstrumentProvider,
+    ctx: &FillContext<'_>,
+    instrument_filter: Option<InstrumentId>,
+    ts_init: UnixNanos,
+) -> Vec<PositionStatusReport> {
+    let positions = match data_api_client.get_positions(ctx.user_address, None::<&[&str]>).await {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Failed to fetch positions from Data API: {e}");
+            return vec![];
+        }
+    };
+
+    let mut reports = Vec::new();
+
+    for pos in positions {
+        if pos.size <= 0.0 {
+            continue; // FLAT — skip
+        }
+
+        let token_id = Ustr::from(pos.asset.as_str());
+        let instrument = match provider.get_by_token_id(&token_id) {
+            Some(i) => i,
+            None => {
+                log::debug!(
+                    "Skipping position for token {token_id}: not in instrument provider cache"
+                );
+                continue;
+            }
+        };
+
+        let instrument_id = instrument.id();
+
+        if let Some(filter_id) = instrument_filter
+            && instrument_id != filter_id
+        {
+            continue;
+        }
+
+        let quantity = Quantity::new(pos.size, instrument.size_precision());
+
+        let avg_px_open = if pos.avg_price > 0.0 {
+            rust_decimal::Decimal::try_from(pos.avg_price).ok()
+        } else {
+            None
+        };
+
+        log::info!("Open position: {instrument_id} qty={quantity} avg_px={avg_px_open:?}");
+
+        let report = PositionStatusReport::new(
+            ctx.account_id,
+            instrument_id,
+            PositionSideSpecified::Long,
+            quantity,
+            ts_init,
+            ts_init,
+            None,
+            None,
+            avg_px_open,
+        );
+
+        reports.push(report);
+    }
+
+    log::info!("Generated {} position report(s) from Data API", reports.len());
+
+    reports
 }

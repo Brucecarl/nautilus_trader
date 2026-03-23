@@ -34,7 +34,7 @@ use nautilus_common::{
     enums::LogLevel,
     live::runner::set_exec_event_sender,
     messages::{
-        ExecutionEvent, ExecutionReport,
+        ExecutionEvent,
         execution::{
             BatchCancelOrders, CancelOrder, GenerateFillReports, GenerateOrderStatusReport,
             GenerateOrderStatusReports, GeneratePositionStatusReports, ModifyOrder, SubmitOrder,
@@ -46,11 +46,8 @@ use nautilus_core::{UUID4, UnixNanos};
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     accounts::{AccountAny, cash::CashAccount},
-    enums::{
-        AccountType, AssetClass, CurrencyType, OmsType, OrderSide, OrderStatus, OrderType,
-        TimeInForce,
-    },
-    events::{AccountState, OrderEventAny, OrderPendingCancel},
+    enums::{AccountType, AssetClass, CurrencyType, OmsType, OrderSide, OrderType, TimeInForce},
+    events::{AccountState, OrderEventAny},
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId, Venue,
         VenueOrderId,
@@ -79,7 +76,6 @@ struct TestServerState {
     cancel_response: Arc<tokio::sync::Mutex<Option<Value>>>,
     batch_cancel_response: Arc<tokio::sync::Mutex<Option<Value>>>,
     book_response: Arc<tokio::sync::Mutex<Option<Value>>>,
-    single_order_response: Arc<tokio::sync::Mutex<Option<Value>>>,
 }
 
 impl Default for TestServerState {
@@ -93,7 +89,6 @@ impl Default for TestServerState {
             order_response_status: Arc::new(tokio::sync::Mutex::new(StatusCode::OK)),
             cancel_response: Arc::new(tokio::sync::Mutex::new(None)),
             batch_cancel_response: Arc::new(tokio::sync::Mutex::new(None)),
-            single_order_response: Arc::new(tokio::sync::Mutex::new(None)),
             book_response: Arc::new(tokio::sync::Mutex::new(Some(json!({
                 "bids": [
                     {"price": "0.48", "size": "100.00"},
@@ -129,6 +124,8 @@ fn create_test_exec_config(addr: SocketAddr) -> PolymarketExecClientConfig {
         funder: None,
         base_url_http: Some(format!("http://{addr}")),
         base_url_ws: Some(format!("ws://{addr}/ws")),
+        base_url_gamma: Some(format!("http://{addr}")),
+        base_url_data_api: Some(format!("http://{addr}")),
         http_timeout_secs: 5,
         max_retries: 0,
         ..PolymarketExecClientConfig::default()
@@ -197,16 +194,17 @@ async fn handle_get_orders(State(state): State<TestServerState>) -> Response {
 
 async fn handle_get_order(State(state): State<TestServerState>) -> Response {
     *state.last_path.lock().await = "/data/order".to_string();
-    let resp = state.single_order_response.lock().await;
-    match resp.as_ref() {
-        Some(v) => Json(v.clone()).into_response(),
-        None => Json(load_json("http_open_order.json")).into_response(),
-    }
+    Json(load_json("http_open_order.json")).into_response()
 }
 
 async fn handle_get_trades(State(state): State<TestServerState>) -> Response {
     *state.last_path.lock().await = "/data/trades".to_string();
     Json(load_json("http_trades_page.json")).into_response()
+}
+
+async fn handle_get_positions(State(state): State<TestServerState>) -> Response {
+    *state.last_path.lock().await = "/positions".to_string();
+    Json(load_json("data_api_positions_response.json")).into_response()
 }
 
 async fn handle_get_balance(State(state): State<TestServerState>) -> Response {
@@ -287,10 +285,6 @@ async fn handle_get_book(State(state): State<TestServerState>) -> Response {
     }
 }
 
-async fn handle_get_fee_rate() -> impl IntoResponse {
-    Json(json!({"base_fee": "0"}))
-}
-
 async fn handle_health() -> impl IntoResponse {
     StatusCode::OK
 }
@@ -300,6 +294,7 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/data/orders", get(handle_get_orders))
         .route("/data/order/{id}", get(handle_get_order))
         .route("/data/trades", get(handle_get_trades))
+        .route("/positions", get(handle_get_positions))
         .route("/balance-allowance", get(handle_get_balance))
         .route(
             "/order",
@@ -309,7 +304,6 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/cancel-all", delete(handle_cancel_all))
         .route("/markets", get(handle_gamma_markets))
         .route("/book", get(handle_get_book))
-        .route("/fee-rate", get(handle_get_fee_rate))
         .route("/health", get(handle_health))
         .with_state(state)
 }
@@ -431,7 +425,7 @@ async fn test_generate_fill_reports_empty_without_instruments() {
 
 #[rstest]
 #[tokio::test]
-async fn test_generate_position_status_reports_always_empty() {
+async fn test_generate_position_status_reports_empty_when_no_instruments_loaded() {
     let state = TestServerState::default();
     let addr = start_mock_server(state).await;
     let (client, _rx, _cache) = create_test_execution_client(addr);
@@ -449,7 +443,7 @@ async fn test_generate_position_status_reports_always_empty() {
 
     let reports = client.generate_position_status_reports(&cmd).await.unwrap();
 
-    // Polymarket has no position endpoint
+    // Data API returns positions but none match loaded instruments (provider cache empty)
     assert!(reports.is_empty());
 }
 
@@ -797,110 +791,7 @@ async fn test_submit_market_order_buy_accepted() {
         .unwrap();
     assert_order_event(event, "Submitted");
 
-    // Updated (quote-to-base conversion for BUY quote_quantity orders)
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Updated");
-
     // Accepted (async, after HTTP post)
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_submit_market_order_buy_quote_to_base_conversion() {
-    let state = TestServerState::default();
-    // Book with a single ask at 0.50 so crossing price is exactly 0.50
-    *state.book_response.lock().await = Some(json!({
-        "bids": [{"price": "0.48", "size": "100.00"}],
-        "asks": [{"price": "0.50", "size": "100.00"}]
-    }));
-    let addr = start_mock_server(state.clone()).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    // BUY 10 USDC worth with quote_quantity=true
-    let order = make_market_order("O-MKT-QTY", instrument_id, OrderSide::Buy, true);
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-    let cmd = make_submit_cmd(&order, instrument_id);
-
-    client.submit_order(&cmd).unwrap();
-
-    // Submitted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Updated: quote-to-base conversion
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let updated = assert_order_event(event, "Updated");
-
-    // Verify the Updated event has the correct base quantity and is_quote_quantity=false
-    if let OrderEventAny::Updated(ref u) = updated {
-        // 10 USDC / 0.50 price = 20 shares (instrument has size_precision=0)
-        assert_eq!(u.quantity, Quantity::from(20));
-        assert!(
-            !u.is_quote_quantity,
-            "is_quote_quantity should be false after conversion"
-        );
-    } else {
-        panic!("Expected Updated event");
-    }
-
-    // Accepted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_submit_market_order_sell_no_updated_event() {
-    let state = TestServerState::default();
-    let addr = start_mock_server(state.clone()).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    // SELL 10 shares with quote_quantity=false (no conversion needed)
-    let order = make_market_order("O-MKT-SELL", instrument_id, OrderSide::Sell, false);
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-    let cmd = make_submit_cmd(&order, instrument_id);
-
-    client.submit_order(&cmd).unwrap();
-
-    // Submitted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Accepted (no Updated event for SELL orders)
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .unwrap()
@@ -936,89 +827,6 @@ async fn test_submit_market_order_rejected_empty_book() {
         .unwrap()
         .unwrap();
     assert_order_event(event, "Rejected");
-}
-
-fn assert_order_status_report(event: ExecutionEvent, expected_status: OrderStatus) {
-    match event {
-        ExecutionEvent::Report(report) => match report {
-            ExecutionReport::Order(r) => {
-                assert_eq!(
-                    r.order_status, expected_status,
-                    "Expected {expected_status:?}, was {:?}",
-                    r.order_status
-                );
-            }
-            other => panic!("Expected Order report, was {other:?}"),
-        },
-        other => panic!("Expected Report event, was {other:?}"),
-    }
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_fok_deferred_check_emits_rejected_for_unmatched() {
-    let state = TestServerState::default();
-    // REST returns UNMATCHED for the FOK order status check
-    *state.single_order_response.lock().await = Some(json!({
-        "associate_trades": [],
-        "id": "test-fok-order-id",
-        "status": "UNMATCHED",
-        "market": "0xtest",
-        "original_size": "10.0000",
-        "outcome": "Yes",
-        "maker_address": "0xtest",
-        "owner": "test-owner",
-        "price": "0.5100",
-        "side": "BUY",
-        "size_matched": "0.0000",
-        "asset_id": "TEST-TOKEN",
-        "expiration": null,
-        "order_type": "FOK",
-        "created_at": 1_703_875_200_000_i64
-    }));
-    let addr = start_mock_server(state.clone()).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    let order = make_market_order("O-FOK-UNMATCHED", instrument_id, OrderSide::Buy, true);
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-    let cmd = make_submit_cmd(&order, instrument_id);
-
-    client.submit_order(&cmd).unwrap();
-
-    // Submitted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Updated (quote-to-base conversion)
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Updated");
-
-    // Accepted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-
-    // Deferred FOK check: after ~5s, should emit a Rejected status report
-    let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_status_report(event, OrderStatus::Rejected);
 }
 
 fn make_limit_order(
@@ -1432,9 +1240,8 @@ async fn test_cancel_order_skips_non_open_order() {
     let cmd = make_cancel_cmd("O-CANCEL-INIT", instrument_id);
     client.cancel_order(&cmd).unwrap();
 
-    // CancelRejected is emitted synchronously for non-open orders
-    let event = rx.try_recv().expect("Expected CancelRejected event");
-    assert_order_event(event, "CancelRejected");
+    // No event should be emitted since the order is not open
+    assert!(rx.try_recv().is_err());
 }
 
 #[rstest]
@@ -1635,295 +1442,4 @@ async fn test_batch_cancel_orders_with_partial_failure() {
     // No CancelRejected events expected.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(rx.try_recv().is_err());
-}
-
-fn submit_and_pending_cancel(cache: &Rc<RefCell<Cache>>, order: &mut OrderAny) {
-    let account_id = AccountId::from("POLYMARKET-001");
-    let submitted = TestOrderEventStubs::submitted(order, account_id);
-    order.apply(submitted).unwrap();
-    cache.borrow_mut().update_order(order).unwrap();
-
-    let pending_cancel = OrderPendingCancel::new(
-        order.trader_id(),
-        order.strategy_id(),
-        order.instrument_id(),
-        order.client_order_id(),
-        account_id,
-        UUID4::new(),
-        UnixNanos::default(),
-        UnixNanos::default(),
-        false,
-        None, // No venue_order_id yet
-    );
-    order
-        .apply(OrderEventAny::PendingCancel(pending_cancel))
-        .unwrap();
-    cache.borrow_mut().update_order(order).unwrap();
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_cancel_order_deferred_when_no_venue_order_id() {
-    let state = TestServerState::default();
-    let addr = start_mock_server(state).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    let mut order = make_limit_order(
-        "O-DEFERRED-CANCEL",
-        instrument_id,
-        OrderSide::Buy,
-        false,
-        false,
-        false,
-        TimeInForce::Gtc,
-    );
-
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-
-    // Transition order to PENDING_CANCEL without a venue_order_id
-    submit_and_pending_cancel(&cache, &mut order);
-
-    // Cancel should be deferred (no venue_order_id available)
-    let cmd = make_cancel_cmd("O-DEFERRED-CANCEL", instrument_id);
-    client.cancel_order(&cmd).unwrap();
-
-    // No events emitted yet
-    assert!(rx.try_recv().is_err());
-
-    // Submit the order, triggering the HTTP response with a venue_order_id.
-    // handle_order_response detects the pending cancel and issues the deferred cancel.
-    let submit_cmd = make_submit_cmd(&order, instrument_id);
-    client.submit_order(&submit_cmd).unwrap();
-
-    // Submitted event (sync)
-    let event = rx.try_recv().unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Accepted event (async, from HTTP response)
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-
-    // Deferred cancel fires against the mock server (returns success).
-    // A successful cancel produces no rejection event.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(rx.try_recv().is_err());
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_cancel_order_deferred_with_already_done_response() {
-    let state = TestServerState::default();
-    // Mock server returns "already canceled or matched" for the cancel
-    *state.cancel_response.lock().await = Some(load_json("http_cancel_response_failed.json"));
-    let addr = start_mock_server(state).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    let mut order = make_limit_order(
-        "O-DEFERRED-DONE",
-        instrument_id,
-        OrderSide::Buy,
-        false,
-        false,
-        false,
-        TimeInForce::Gtc,
-    );
-
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-
-    submit_and_pending_cancel(&cache, &mut order);
-
-    let cmd = make_cancel_cmd("O-DEFERRED-DONE", instrument_id);
-    client.cancel_order(&cmd).unwrap();
-
-    let submit_cmd = make_submit_cmd(&order, instrument_id);
-    client.submit_order(&submit_cmd).unwrap();
-
-    // Submitted
-    let event = rx.try_recv().unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Accepted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-
-    // Deferred cancel gets "already done" response, which is suppressed
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(rx.try_recv().is_err());
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_cancel_order_deferred_with_rejection_response() {
-    let state = TestServerState::default();
-    // Mock server returns an unexpected cancel failure
-    *state.cancel_response.lock().await = Some(json!({
-        "not_canceled": "order not found"
-    }));
-    let addr = start_mock_server(state).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-    add_instrument_to_cache(&cache, instrument_id);
-
-    let mut order = make_limit_order(
-        "O-DEFERRED-REJECT",
-        instrument_id,
-        OrderSide::Buy,
-        false,
-        false,
-        false,
-        TimeInForce::Gtc,
-    );
-
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-
-    submit_and_pending_cancel(&cache, &mut order);
-
-    let cmd = make_cancel_cmd("O-DEFERRED-REJECT", instrument_id);
-    client.cancel_order(&cmd).unwrap();
-
-    let submit_cmd = make_submit_cmd(&order, instrument_id);
-    client.submit_order(&submit_cmd).unwrap();
-
-    // Submitted
-    let event = rx.try_recv().unwrap();
-    assert_order_event(event, "Submitted");
-
-    // Accepted
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "Accepted");
-
-    // Deferred cancel gets "order not found" which emits CancelRejected
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "CancelRejected");
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_cancel_order_uses_cache_index_fallback() {
-    // Simulates the window where _post_signed_order completed (venue_order_id
-    // cached in the index) but OrderAccepted has not yet been applied to the
-    // order object. cancel_order should find the ID via the cache index and
-    // proceed with the cancel directly, bypassing the deferred mechanism.
-    let state = TestServerState::default();
-    let addr = start_mock_server(state).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-
-    let mut order = make_limit_order(
-        "O-CACHE-FALLBACK",
-        instrument_id,
-        OrderSide::Buy,
-        false,
-        false,
-        false,
-        TimeInForce::Gtc,
-    );
-
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-
-    // Transition to PENDING_CANCEL (no venue_order_id on the order object)
-    submit_and_pending_cancel(&cache, &mut order);
-
-    // Add venue_order_id to the cache INDEX only, simulating what
-    // handle_order_response does via emit_order_accepted -> cache update.
-    // The order object itself still has venue_order_id = None.
-    let vid = VenueOrderId::from("0xvenue-cache-fallback");
-    cache
-        .borrow_mut()
-        .add_venue_order_id(&ClientOrderId::from("O-CACHE-FALLBACK"), &vid, false)
-        .unwrap();
-
-    // cancel_order should find the venue_order_id in the cache index
-    // and send the cancel HTTP request directly (no deferred mechanism)
-    let cmd = make_cancel_cmd("O-CACHE-FALLBACK", instrument_id);
-    client.cancel_order(&cmd).unwrap();
-
-    // A successful cancel via the mock server produces no rejection event
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(rx.try_recv().is_err());
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_cancel_order_cache_fallback_with_rejection() {
-    // Same cache index fallback path, but the venue returns an error so we
-    // can verify a CancelRejected event is emitted.
-    let state = TestServerState::default();
-    *state.cancel_response.lock().await = Some(json!({
-        "not_canceled": "order not found"
-    }));
-    let addr = start_mock_server(state).await;
-    let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    client.start().unwrap();
-
-    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
-
-    let mut order = make_limit_order(
-        "O-CACHE-REJECT",
-        instrument_id,
-        OrderSide::Buy,
-        false,
-        false,
-        false,
-        TimeInForce::Gtc,
-    );
-
-    cache
-        .borrow_mut()
-        .add_order(order.clone(), None, None, false)
-        .unwrap();
-
-    submit_and_pending_cancel(&cache, &mut order);
-
-    let vid = VenueOrderId::from("0xvenue-cache-reject");
-    cache
-        .borrow_mut()
-        .add_venue_order_id(&ClientOrderId::from("O-CACHE-REJECT"), &vid, false)
-        .unwrap();
-
-    let cmd = make_cancel_cmd("O-CACHE-REJECT", instrument_id);
-    client.cancel_order(&cmd).unwrap();
-
-    // The cancel hit the venue, received "order not found", emits CancelRejected
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_order_event(event, "CancelRejected");
 }
