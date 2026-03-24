@@ -143,6 +143,14 @@ impl LiveNodeBuilder {
         self
     }
 
+    /// Set the open order check interval in seconds for continuous reconciliation.
+    /// Set to `None` to disable (default).
+    #[must_use]
+    pub fn with_open_check_interval_secs(mut self, secs: f64) -> Self {
+        self.config.exec_engine.open_check_interval_secs = Some(secs);
+        self
+    }
+
     /// Set the portfolio initialization timeout in seconds.
     #[must_use]
     pub const fn with_timeout_portfolio(mut self, timeout_secs: u64) -> Self {

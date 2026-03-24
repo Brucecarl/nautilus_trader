@@ -31,6 +31,7 @@ use std::{
 use ahash::{AHashMap, AHashSet};
 use anyhow::Context;
 use async_trait::async_trait;
+use log::{debug, info};
 use nautilus_common::{
     cache::fifo::{FifoCache, FifoCacheMap},
     clients::ExecutionClient,
@@ -391,7 +392,14 @@ impl PolymarketExecutionClient {
                             }
 
                             let is_accepted = fill_tracker.contains(&venue_order_id);
-                            if is_accepted {
+                            //this is added to pass order cancel event to the upper stream
+                            let is_terminal = matches!(
+                                order.status,
+                                PolymarketOrderStatus::Canceled
+                                    | PolymarketOrderStatus::CanceledMarketResolved
+                            );
+                            log::debug!("order event:{:?}",report);
+                            if is_accepted ||is_terminal{
                                 emitter.send_order_status_report(report);
                             } else {
                                 let mut guard = pending_order_reports.lock().expect(MUTEX_POISONED);
