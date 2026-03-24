@@ -17,6 +17,7 @@ use std::{collections::VecDeque, ops::ControlFlow, pin::Pin, time::Duration};
 
 use ahash::AHashMap;
 use bytes::Bytes;
+use log::warn;
 use nautilus_common::{
     cache::database::{CacheDatabaseAdapter, CacheMap},
     live::get_runtime,
@@ -668,7 +669,8 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     fn add_position(&self, position: &Position) -> anyhow::Result<()> {
-        todo!()
+        warn!("add_position do nothing");
+        Ok(())
     }
 
     fn add_position_snapshot(&self, snapshot: &PositionSnapshot) -> anyhow::Result<()> {
@@ -681,7 +683,8 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     fn add_order_book(&self, order_book: &OrderBook) -> anyhow::Result<()> {
-        todo!()
+        warn!("add_order_book do nothing");
+        Ok(())
     }
 
     fn add_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
@@ -919,15 +922,17 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
     ) -> anyhow::Result<()> {
-        todo!()
+        warn!("index_venue_order_id do nothing");
+        Ok(())
     }
 
     fn index_order_position(
         &self,
-        client_order_id: ClientOrderId,
-        position_id: PositionId,
+        _client_order_id: ClientOrderId,
+        _position_id: PositionId,
     ) -> anyhow::Result<()> {
-        todo!()
+        warn!("index_order_position do nothing");
+        Ok(())
     }
 
     fn update_actor(&self) -> anyhow::Result<()> {
