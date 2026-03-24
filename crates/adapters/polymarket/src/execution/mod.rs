@@ -30,6 +30,7 @@ use std::{
 use ahash::AHashSet;
 use anyhow::Context;
 use async_trait::async_trait;
+use log::{debug, info};
 use nautilus_common::{
     cache::fifo::FifoCacheMap,
     clients::ExecutionClient,
@@ -356,7 +357,104 @@ impl PolymarketExecutionClient {
                                         "Failed to refresh account after finalized trade: {e}"
                                     ),
                                 }
-                            });
+                            };
+                            let ts_event = parse_timestamp_ms(&order.timestamp)
+                                .unwrap_or_else(|_| clock.get_time_ns());
+                            let venue_order_id = VenueOrderId::from(order.id.as_str());
+                            let order_status = OrderStatus::from(order.status);
+                            let order_side = OrderSide::from(order.side);
+                            let time_in_force = TimeInForce::from(order.order_type);
+                            let quantity = Quantity::new(
+                                order.original_size.parse::<f64>().unwrap_or(0.0),
+                                instrument.size_precision(),
+                            );
+                            let filled_qty = Quantity::new(
+                                order.size_matched.parse::<f64>().unwrap_or(0.0),
+                                instrument.size_precision(),
+                            );
+                            let price = Price::new(
+                                order.price.parse::<f64>().unwrap_or(0.0),
+                                instrument.price_precision(),
+                            );
+                            let mut report = OrderStatusReport::new(
+                                account_id,
+                                instrument.id(),
+                                None,
+                                venue_order_id,
+                                order_side,
+                                OrderType::Limit,
+                                time_in_force,
+                                order_status,
+                                quantity,
+                                filled_qty,
+                                ts_event,
+                                ts_event,
+                                ts_event,
+                                None,
+                            );
+                            report.price = Some(price);
+
+                            if time_in_force == TimeInForce::Gtd {
+                                if let Some(exp_str) = &order.expiration {
+                                    if let Ok(secs) = exp_str.parse::<u64>() {
+                                        if secs > 0 {
+                                            report = report.with_expire_time(
+                                                UnixNanos::from(secs * 1_000_000_000),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            let is_accepted = fill_tracker.contains(&venue_order_id);
+                            //this is added to pass order cancel event to the upper stream
+                            let is_terminal = matches!(
+                                order.status,
+                                PolymarketOrderStatus::Canceled
+                                    | PolymarketOrderStatus::CanceledMarketResolved
+                            );
+                            log::debug!("order event:{:?}",report);
+                            if is_accepted || is_terminal {
+                                emitter.send_order_status_report(report);
+                            } else {
+                                let mut guard = pending_order_reports.lock().expect(MUTEX_POISONED);
+                                if let Some(reports) = guard.get_mut(&venue_order_id) {
+                                    reports.push(report);
+                                } else {
+                                    guard.insert(venue_order_id, vec![report]);
+                                }
+                            }
+
+                            // MATCHED convergence: check for dust residual
+                            if order.status == PolymarketOrderStatus::Matched
+                                && let Some(dust_fill) =
+                                    fill_tracker.check_dust_and_build_fill(
+                                        &venue_order_id,
+                                        account_id,
+                                        &order.id,
+                                        price.as_f64(),
+                                        get_usdc_currency(),
+                                        ts_event,
+                                    )
+                            {
+                                if is_accepted {
+                                    emitter.send_fill_report(dust_fill);
+                                } else {
+                                    let mut guard =
+                                        pending_fills.lock().expect(MUTEX_POISONED);
+
+                                    if let Some(fills) =
+                                        guard.get_mut(&venue_order_id)
+                                    {
+                                        fills.push(dust_fill);
+                                    } else {
+                                        guard.insert(
+                                            venue_order_id,
+                                            vec![dust_fill],
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(PolymarketWsMessage::Market(_)) => {}
