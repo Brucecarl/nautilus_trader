@@ -1180,6 +1180,15 @@ impl LiveNode {
             );
         }
 
+        if strategy.claim_all_external_orders() {
+            self.exec_manager.set_catch_all_external_strategy(strategy_id)?;
+            log_info!(
+                "Registered catch-all external order claim for {}",
+                strategy_id,
+                color = LogColor::Blue
+            );
+        }
+
         self.kernel.trader.add_strategy(strategy)
     }
 
