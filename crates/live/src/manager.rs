@@ -21,6 +21,7 @@
 use std::{cell::RefCell, fmt::Debug, rc::Rc, str::FromStr, sync::LazyLock};
 
 use ahash::{AHashMap, AHashSet};
+use anyhow::bail;
 use indexmap::IndexMap;
 use nautilus_common::{
     cache::Cache,
@@ -298,6 +299,7 @@ pub struct ExecutionManager {
     config: ExecutionManagerConfig,
     inflight_checks: AHashMap<ClientOrderId, InflightCheck>,
     external_order_claims: AHashMap<InstrumentId, StrategyId>,
+    catch_all_external_strategy: Option<StrategyId>,
     processed_fills: AHashMap<TradeId, ClientOrderId>,
     recon_check_retries: AHashMap<ClientOrderId, u32>,
     ts_last_query: AHashMap<ClientOrderId, UnixNanos>,
@@ -332,6 +334,7 @@ impl ExecutionManager {
             config,
             inflight_checks: AHashMap::new(),
             external_order_claims: AHashMap::new(),
+            catch_all_external_strategy: None,
             processed_fills: AHashMap::new(),
             recon_check_retries: AHashMap::new(),
             ts_last_query: AHashMap::new(),
@@ -1200,6 +1203,15 @@ impl ExecutionManager {
     pub fn claim_external_orders(&mut self, instrument_id: InstrumentId, strategy_id: StrategyId) {
         self.external_order_claims
             .insert(instrument_id, strategy_id);
+    }
+
+    /// Sets a catch-all strategy to claim ALL external orders not matched by a specific claim.
+    pub fn set_catch_all_external_strategy(&mut self, strategy_id: StrategyId) -> anyhow::Result<()> {
+        if self.catch_all_external_strategy.is_some() {
+            bail!("catch_all_external_strategy can only be set once");
+        }
+        self.catch_all_external_strategy = Some(strategy_id);
+        Ok(())
     }
 
     /// Records position activity for reconciliation tracking.
@@ -2187,6 +2199,18 @@ impl ExecutionManager {
                     claimed_strategy,
                 );
                 (*claimed_strategy, None)
+            } else if let Some(catch_all) = self.catch_all_external_strategy {
+                let order_id = report
+                    .client_order_id
+                    .map_or_else(|| report.venue_order_id.to_string(), |id| id.to_string());
+                log::info!(
+                    color = LogColor::Blue as u8;
+                    "External order {} for {} claimed by catch-all strategy {}",
+                    order_id,
+                    report.instrument_id,
+                    catch_all,
+                );
+                (catch_all, None)
             } else {
                 // Unclaimed orders use EXTERNAL strategy ID with tag distinguishing source
                 let tag = if is_synthetic {

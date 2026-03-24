@@ -91,6 +91,12 @@ pub trait Strategy: DataActor {
         None
     }
 
+    /// If `true`, this strategy claims ALL external orders regardless of instrument.
+    /// Acts as a catch-all fallback when no specific `external_order_claims` match.
+    fn claim_all_external_orders(&self) -> bool {
+        false
+    }
+
     /// Submits an order.
     ///
     /// # Errors
