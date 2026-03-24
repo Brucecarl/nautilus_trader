@@ -233,34 +233,29 @@ impl Position {
         self.realized_pnl
     }
 
-    #[getter]
     #[pyo3(name = "events")]
     fn py_events(&self) -> Vec<OrderFilled> {
         self.events.clone()
     }
 
-    #[getter]
     #[pyo3(name = "adjustments")]
     fn py_adjustments(&self) -> Vec<PositionAdjusted> {
         self.adjustments.clone()
     }
 
     /// Returns unique client order IDs from all fill events, sorted.
-    #[getter]
     #[pyo3(name = "client_order_ids")]
     fn py_client_order_ids(&self) -> Vec<ClientOrderId> {
         self.client_order_ids()
     }
 
     /// Returns unique venue order IDs from all fill events, sorted.
-    #[getter]
     #[pyo3(name = "venue_order_ids")]
     fn py_venue_order_ids(&self) -> Vec<VenueOrderId> {
         self.venue_order_ids()
     }
 
     /// Returns unique trade IDs from all fill events, sorted.
-    #[getter]
     #[pyo3(name = "trade_ids")]
     fn py_trade_ids(&self) -> Vec<TradeId> {
         self.trade_ids()
@@ -460,7 +455,7 @@ impl Position {
             PyList::new(py, self.venue_order_ids().iter().map(ToString::to_string))
                 .expect("Invalid `ExactSizeIterator`");
         dict.set_item("venue_order_ids", venue_order_ids_list)?;
-        let trade_ids_list = PyList::new(py, self.trade_ids.iter().map(ToString::to_string))
+        let trade_ids_list = PyList::new(py, self.trade_ids().iter().map(ToString::to_string))
             .expect("Invalid `ExactSizeIterator`");
         dict.set_item("trade_ids", trade_ids_list)?;
         dict.set_item("buy_qty", self.buy_qty.to_string())?;

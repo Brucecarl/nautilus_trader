@@ -139,7 +139,7 @@ chrono-tz = "0.10.4"
 clap = { version = "4.6.0", features = ["derive", "env"] }
 ctrlc = "3.5.2"
 dashmap = "6.1.0"
-datafusion = { version = "52.3.0", default-features = false, features = [
+datafusion = { version = "52.4.0", default-features = false, features = [
   "parquet",
   "regex_expressions",
   "unicode_expressions",
@@ -197,12 +197,14 @@ pyo3-async-runtimes = { version = "0.28.0", default-features = false, features =
   "tokio",
   "tokio-runtime",
 ] }
-pyo3-stub-gen = { version = "0.19.0", features = ["rust_decimal"] }
+pyo3-stub-gen = { version = "0.19.0", default-features = false, features = [
+  "rust_decimal",
+] }
 rand = { version = "0.10.0", default-features = false, features = [
   "std",
   "thread_rng",
 ] }
-redis = { version = "1.0.5", default-features = false, features = [
+redis = { version = "1.1.0", default-features = false, features = [
   "connection-manager",
   "sentinel",
   "streams",
@@ -303,7 +305,7 @@ alloy-signer-local = { version = "1.7.3", default-features = false, features = [
   "mnemonic",
 ] }
 alloy-sol-types = "1.5.7"
-arc-swap = "1.8.2"
+arc-swap = "1.9.0"
 cosmrs = { version = "0.22.0", default-features = false, features = ["bip32"] }
 csv = "1.4.0"
 databento = { version = "0.44.0", default-features = false, features = [
@@ -368,9 +370,9 @@ walkdir = "2.5.0"
 cargo-audit = "0.22.1"
 cargo-deny = "0.19.0"
 cargo-edit = "0.13.9"
-cargo-llvm-cov = "0.8.4"
+cargo-llvm-cov = "0.8.5"
 cargo-machete = "0.9.1"
-cargo-nextest = "0.9.131"
+cargo-nextest = "0.9.132"
 cargo-vet = "0.10.2"
 lychee = "0.23.0"
 

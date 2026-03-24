@@ -75,6 +75,7 @@ class ClassMethodFixup:
     classmethods: set[str] = field(default_factory=set)
     renames: dict[str, str] = field(default_factory=dict)
     injected_staticmethods: dict[str, str] = field(default_factory=dict)
+    signature_defaults: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 # Classes to relocate from _libnautilus to their target modules
@@ -261,6 +262,12 @@ def post_process_stubs(root: Path) -> None:
         # Remove imports extracted from doc comment examples
         content = remove_docstring_imports(content)
 
+        # Add = None default to Optional parameters that lack one
+        content = add_optional_defaults(content)
+
+        # Restore actual default values from #[pyo3(signature)] attributes
+        content = apply_signature_defaults(content, rust_fixups)
+
         # Import model symbols used without a module qualifier
         content = add_missing_model_imports(content)
 
@@ -295,12 +302,168 @@ IDENTIFIER_INVOKE_RE = re.compile(
 )
 STUB_CLASS_RE = re.compile(r"^class ([A-Za-z_][A-Za-z0-9_]*)(?:\([^)]*\))?:$")
 STUB_DEF_RE = re.compile(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)\(")
+PYO3_SIGNATURE_RE = re.compile(r"#\[(?:pyo3|pyfunction)\(.*\bsignature\s*=\s*\(")
+
+
+def _extract_pyo3_signature_defaults(attr: str) -> dict[str, str] | None:
+    """
+    Parse a ``#[pyo3(signature = (...))]`` attribute and return a mapping of parameter
+    names to their Python-syntax default values.
+
+    Only includes defaults that are safe to emit: a default is excluded when a
+    subsequent positional parameter has no translatable default, because adding
+    it would create an invalid "required after default" signature.
+
+    """
+    match = PYO3_SIGNATURE_RE.search(attr)
+    if match is None:
+        return None
+
+    params_str = _extract_signature_params_str(attr, match.end() - 1)
+    params_with_defaults = _resolve_signature_params(params_str)
+    return _filter_safe_defaults(params_with_defaults)
+
+
+def _extract_signature_params_str(attr: str, open_paren: int) -> str:
+    """
+    Return the content between the matching parens starting at *open_paren*.
+    """
+    depth = 0
+    end = open_paren
+    for i in range(open_paren, len(attr)):
+        if attr[i] == "(":
+            depth += 1
+        elif attr[i] == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    return attr[open_paren + 1 : end]
+
+
+def _resolve_signature_params(
+    params_str: str,
+) -> list[tuple[str, str | None]]:
+    """
+    Parse each parameter in a pyo3 signature string and translate its default to Python
+    syntax.
+
+    The ``*`` separator is dropped because pyo3-stub-gen
+    does not emit it in stubs.
+
+    """
+    params: list[tuple[str, str | None]] = []
+    for param in _split_signature_params(params_str):
+        param = param.strip()
+        if not param or param == "*":
+            continue
+        if "=" not in param:
+            params.append((param, None))
+            continue
+        eq_pos = param.index("=")
+        name = param[:eq_pos].strip()
+        rust_default = param[eq_pos + 1 :].strip()
+        params.append((name, _rust_default_to_python(rust_default)))
+    return params
+
+
+def _filter_safe_defaults(
+    params: list[tuple[str, str | None]],
+) -> dict[str, str] | None:
+    """
+    Walk right-to-left and suppress defaults that would precede a required parameter
+    (one with no translatable default).
+    """
+    safe: dict[str, str] = {}
+    saw_required = False
+    for name, py_default in reversed(params):
+        if py_default is not None and not saw_required:
+            safe[name] = py_default
+        elif py_default is None:
+            saw_required = True
+    return safe if safe else None
+
+
+def _split_signature_params(params_str: str) -> list[str]:
+    """
+    Split a pyo3 signature parameter list, respecting nested parens and angle
+    brackets so that defaults like ``HashMap::new()`` are kept intact.
+    """
+    params: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in params_str:
+        if ch in "(<[":
+            depth += 1
+            current.append(ch)
+        elif ch in ")>]":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            params.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        params.append("".join(current))
+    return params
+
+
+def _rust_default_to_python(rust_default: str) -> str | None:
+    """
+    Translate a Rust default value from ``#[pyo3(signature)]`` to Python syntax.
+
+    Returns ``None`` for values that cannot be meaningfully translated (e.g.
+    ``Vec::new()``), which should remain as ``...`` in the stub.
+
+    """
+    if rust_default == "None":
+        return "None"
+    if rust_default == "true":
+        return "True"
+    if rust_default == "false":
+        return "False"
+
+    # Unwrap Some(...) and recursively translate the inner value
+    if rust_default.startswith("Some(") and rust_default.endswith(")"):
+        inner = rust_default[5:-1].strip()
+        return _rust_default_to_python(inner)
+
+    # String literals
+    if rust_default.startswith('"') and rust_default.endswith('"'):
+        return rust_default
+
+    # Numeric literals, may have underscores
+    cleaned = rust_default.replace("_", "")
+    try:
+        int(cleaned)
+        return cleaned
+    except ValueError:
+        pass
+    try:
+        float(cleaned)
+        return cleaned
+    except ValueError:
+        pass
+
+    # Enum variants: Type::Variant -> Type.Variant
+    if "::" in rust_default and "(" not in rust_default:
+        return rust_default.replace("::", ".")
+
+    # Skip constructor calls like Vec::new(), HashMap::new(), Some(...)
+    return None
+
+
 BUILTIN_TYPE_NAMES = ("bool", "dict", "float", "int", "list", "set", "str")
+
+# Sentinel class name for module-level (free) function signature defaults
+_FREE_FUNCTIONS_KEY = "__module__"
 
 
 def collect_rust_class_fixups(workspace_root: Path) -> dict[str, ClassMethodFixup]:
     """
-    Collect getter and staticmethod metadata from Rust PyO3 bindings.
+    Collect getter, staticmethod, and signature default metadata from Rust PyO3
+    bindings.
     """
     fixups: dict[str, ClassMethodFixup] = {}
 
@@ -309,6 +472,7 @@ def collect_rust_class_fixups(workspace_root: Path) -> dict[str, ClassMethodFixu
         _collect_pyclass_name_fixups(source, fixups)
         _collect_identifier_macro_fixups(source, fixups)
         _collect_pymethod_fixups(source, fixups)
+        _collect_pyfunction_signature_defaults(source, fixups)
 
     return fixups
 
@@ -400,6 +564,80 @@ def _collect_pymethod_fixups(source: str, fixups: dict[str, ClassMethodFixup]) -
         i = j + 1
 
 
+def _collect_pyfunction_signature_defaults(
+    source: str,
+    fixups: dict[str, ClassMethodFixup],
+) -> None:
+    """
+    Collect signature defaults from ``#[pyfunction]`` free functions.
+
+    Stores defaults under the ``_FREE_FUNCTIONS_KEY`` sentinel so they can be
+    applied to module-level function stubs.
+
+    """
+    lines = source.splitlines()
+    i = 0
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped.startswith("#[pyfunction"):
+            i += 1
+            continue
+
+        pending_attrs, j = _collect_attrs_until_fn(lines, i)
+        if j >= len(lines):
+            break
+
+        method_match, j = consume_rust_method_signature(lines, j)
+        if method_match is not None:
+            _register_free_function_defaults(method_match, pending_attrs, fixups)
+
+        i = j
+
+
+def _collect_attrs_until_fn(
+    lines: list[str],
+    start: int,
+) -> tuple[list[str], int]:
+    """
+    Collect all attributes between a marker line and the next ``fn`` keyword.
+    """
+    pending_attrs: list[str] = []
+    j = start
+    while j < len(lines):
+        attr_stripped = lines[j].strip()
+        if attr_stripped.startswith("#["):
+            attribute, j = consume_rust_attribute(lines, j)
+            pending_attrs.append(attribute)
+        elif attr_stripped.startswith(("///", "//!")):
+            j += 1
+        elif "fn " in attr_stripped:
+            break
+        else:
+            j += 1
+    return pending_attrs, j
+
+
+def _register_free_function_defaults(
+    method_match: re.Match[str],
+    attrs: list[str],
+    fixups: dict[str, ClassMethodFixup],
+) -> None:
+    """
+    Register signature defaults for a free function.
+    """
+    rust_name = method_match.group(1)
+    python_name = _python_exposed_name(rust_name, attrs, False)
+    if not python_name:
+        return
+    for attr in attrs:
+        sig_defaults = _extract_pyo3_signature_defaults(attr)
+        if sig_defaults:
+            fixup = fixups.setdefault(_FREE_FUNCTIONS_KEY, ClassMethodFixup())
+            fixup.signature_defaults[python_name] = sig_defaults
+            break
+
+
 def _collect_block_method_fixups(
     class_name: str,
     block_lines: list[str],
@@ -478,7 +716,8 @@ def register_rust_method_fixup(
     fixups: dict[str, ClassMethodFixup],
 ) -> None:
     """
-    Register getter, staticmethod, and classmethod metadata from a Rust method.
+    Register getter, staticmethod, classmethod, and signature default metadata from a
+    Rust method.
     """
     rust_name = method_match.group(1)
     params = method_match.group(2)
@@ -503,6 +742,8 @@ def register_rust_method_fixup(
     if is_getter:
         fixup.getters.update(method_names)
 
+    _extract_method_signature_defaults(attrs, python_name, fixup)
+
     if is_classmethod:
         fixup.classmethods.update(method_names)
         return
@@ -518,6 +759,21 @@ def register_rust_method_fixup(
     rendered = render_missing_staticmethod_stub(class_name, python_name, params)
     if rendered is not None:
         fixup.injected_staticmethods[python_name] = rendered
+
+
+def _extract_method_signature_defaults(
+    attrs: list[str],
+    python_name: str,
+    fixup: ClassMethodFixup,
+) -> None:
+    """
+    Extract parameter defaults from the first ``#[pyo3(signature)]`` attribute.
+    """
+    for attr in attrs:
+        sig_defaults = _extract_pyo3_signature_defaults(attr)
+        if sig_defaults:
+            fixup.signature_defaults[python_name] = sig_defaults
+            return
 
 
 def _python_exposed_name(rust_name: str, attrs: list[str], is_getter: bool) -> str | None:
@@ -1090,12 +1346,18 @@ def rename_methods(content: str) -> str:
     # Fix __init__ return type to be None
     content = re.sub(r"(def __init__\([^)]*\))\s*->\s*[^:]+:", r"\1 -> None:", content)
 
-    # Strip py_ prefix from remaining methods (project convention: Rust methods use
-    # py_ prefix with #[pyo3(name = "...")] to expose without the prefix to Python).
+    # Strip py_ prefix from function definitions and __all__ entries (project convention:
+    # Rust uses py_ prefix with #[pyo3(name = "...")] to expose without the prefix).
+    # pyo3-stub-gen picks up the rename for def lines but uses the Rust name in __all__.
     # Skip stripping when the result would be a Python keyword.
     content = re.sub(
         r"\bdef py_(\w+)\s*\(",
         lambda m: f"def {m.group(1)}(" if not keyword.iskeyword(m.group(1)) else m.group(0),
+        content,
+    )
+    content = re.sub(
+        r'"py_(\w+)"',
+        lambda m: f'"{m.group(1)}"' if not keyword.iskeyword(m.group(1)) else m.group(0),
         content,
     )
 
@@ -1229,6 +1491,297 @@ def remove_docstring_imports(content: str) -> str:
     lines = content.split("\n")
     lines = [line for line in lines if line.strip() not in _DOCSTRING_IMPORTS]
     return "\n".join(lines)
+
+
+def _split_params(params_str: str) -> list[str]:
+    """
+    Split a parameter string on commas, respecting nested brackets.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(params_str):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(params_str[start:i].strip())
+            start = i + 1
+    tail = params_str[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _is_optional_param(param: str) -> bool:
+    """
+    Check if a parameter has an Optional type annotation at the top level.
+    """
+    colon = param.find(":")
+    if colon < 0:
+        return False
+    type_part = param[colon + 1 :].split("=")[0].strip()
+    if "Optional[" in type_part:
+        return True
+    # Check for `| None` only at bracket depth 0
+    depth = 0
+    for i, ch in enumerate(type_part):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "|" and depth == 0 and "None" in type_part[i + 1 : i + 7].strip():
+            return True
+    return False
+
+
+def _has_default(param: str) -> bool:
+    """
+    Check if a parameter has a default value (respecting brackets).
+    """
+    depth = 0
+    for ch in param:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "=" and depth == 0 and ":" in param[: param.index(ch)]:
+            return True
+    return False
+
+
+def _find_matching_paren(line: str, start: int) -> int:
+    """
+    Return the index of the closing paren matching the open paren at *start*.
+    """
+    depth = 0
+    for i in range(start, len(line)):
+        if line[i] == "(":
+            depth += 1
+        elif line[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _fix_optional_defaults_in_line(line: str) -> str:
+    """
+    Add ``= ...`` to trailing Optional params in a single def line.
+    """
+    paren_start = line.find("(")
+    if paren_start < 0:
+        return line
+
+    paren_end = _find_matching_paren(line, paren_start)
+    if paren_end < 0:
+        return line
+
+    params = _split_params(line[paren_start + 1 : paren_end])
+    if not params:
+        return line
+
+    changed = False
+    for i in range(len(params) - 1, -1, -1):
+        p = params[i]
+        if _has_default(p):
+            continue
+        if _is_optional_param(p):
+            params[i] = p + " = ..."
+            changed = True
+        else:
+            break
+
+    if not changed:
+        return line
+    return line[: paren_start + 1] + ", ".join(params) + line[paren_end:]
+
+
+def add_optional_defaults(content: str) -> str:
+    """
+    Add ``= ...`` to trailing Optional parameters that lack a default value.
+
+    pyo3-stub-gen omits defaults for ``Option<T>`` parameters declared in
+    ``#[pyo3(signature)]`` when the ``infer_signature`` feature is off.
+    Using ``...`` (ellipsis) rather than ``None`` because the actual default
+    may be a non-None value like ``Some(true)`` or ``Some(30)``.
+
+    Only adds defaults to trailing Optional params (right-to-left from the end
+    of the parameter list) to avoid placing a defaulted parameter before a
+    required one.
+
+    """
+    lines = content.split("\n")
+    result = []
+    for line in lines:
+        if "def " in line and ("Optional" in line or "| None" in line):
+            result.append(_fix_optional_defaults_in_line(line))
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
+def apply_signature_defaults(
+    content: str,
+    class_fixups: dict[str, ClassMethodFixup],
+) -> str:
+    """
+    Replace ``= ...`` placeholders and add missing defaults using values extracted from
+    ``#[pyo3(signature)]`` attributes.
+    """
+    all_defaults = _build_defaults_lookup(class_fixups)
+    if not all_defaults:
+        return content
+
+    lines = content.split("\n")
+    result: list[str] = []
+    current_class: str | None = None
+    current_defaults: dict[str, str] | None = None
+    in_signature = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        class_match = STUB_CLASS_RE.match(stripped)
+        if class_match:
+            current_class = class_match.group(1)
+            current_defaults = None
+            in_signature = False
+            result.append(line)
+            continue
+
+        if stripped and not line.startswith((" ", "\t")):
+            current_class = None
+            current_defaults = None
+            in_signature = False
+
+        def_match = STUB_DEF_RE.match(line)
+        if def_match:
+            method_name = def_match.group(1)
+            key = (
+                (current_class, method_name)
+                if current_class
+                else (_FREE_FUNCTIONS_KEY, method_name)
+            )
+            current_defaults = all_defaults.get(key)
+            in_signature = current_defaults is not None
+
+        if in_signature and current_defaults is not None:
+            result.append(_apply_defaults_to_line(line, current_defaults))
+
+            if stripped.endswith((":", "...")):
+                in_signature = False
+        else:
+            result.append(line)
+
+    return "\n".join(result)
+
+
+def _build_defaults_lookup(
+    class_fixups: dict[str, ClassMethodFixup],
+) -> dict[tuple[str | None, str], dict[str, str]]:
+    """
+    Build a flat lookup from ``(class_name, method_name)`` to parameter defaults,
+    accounting for pyclass name renames.
+    """
+    all_defaults: dict[tuple[str | None, str], dict[str, str]] = {}
+    for rust_class, fixup in class_fixups.items():
+        python_class = fixup.python_name or rust_class
+        for method_name, defaults in fixup.signature_defaults.items():
+            all_defaults[(python_class, method_name)] = defaults
+            if python_class != rust_class:
+                all_defaults[(rust_class, method_name)] = defaults
+    return all_defaults
+
+
+def _apply_defaults_to_line(line: str, defaults: dict[str, str]) -> str:
+    """
+    Apply known defaults to parameter declarations on a single line.
+
+    Handles both:
+    - Replacing ``= ...`` with the actual default
+    - Adding ``= <default>`` to parameters that have no default in the stub
+
+    """
+    for param_name, py_default in defaults.items():
+        param_pattern = re.compile(rf"\b{re.escape(param_name)}\s*:")
+        param_match = param_pattern.search(line)
+        if param_match is None:
+            continue
+
+        colon_pos = param_match.end() - 1
+        type_start = colon_pos + 1
+        end_pos, eq_pos, has_ellipsis = _scan_param_type(line, type_start)
+
+        type_text = line[type_start : eq_pos if eq_pos >= 0 else end_pos]
+        qualified = _qualify_enum_default(py_default, type_text)
+
+        if has_ellipsis:
+            before_eq = line[:eq_pos].rstrip()
+            after_dots = line[eq_pos:]
+            after_dots = re.sub(r"=\s*(?:\w+\.)?\.\.\.", f"= {qualified}", after_dots, count=1)
+            line = before_eq + " " + after_dots
+        elif eq_pos < 0:
+            line = line[:end_pos] + f" = {qualified}" + line[end_pos:]
+
+    return line
+
+
+def _scan_param_type(line: str, start: int) -> tuple[int, int, bool]:
+    """
+    Scan a parameter type annotation from *start*, respecting bracket depth.
+
+    Returns ``(end_pos, eq_pos, has_ellipsis)`` where *end_pos* is the index
+    of the first top-level comma or close-paren, *eq_pos* is the index of a
+    top-level ``=`` (or -1 if none), and *has_ellipsis* is ``True`` when the
+    existing default value is ``...``.
+
+    """
+    depth = 0
+    end_pos = len(line)
+    for i in range(start, len(line)):
+        ch = line[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            if depth > 0:
+                depth -= 1
+            else:
+                return i, -1, False
+        elif ch == "," and depth == 0:
+            return i, -1, False
+        elif ch == "=" and depth == 0:
+            rest = line[i + 1 :].lstrip()
+
+            # Match both plain `...` and pyo3-stub-gen's malformed `model....`
+            is_ellipsis = rest.startswith("...") or re.match(r"\w+\.\.\.\.", rest)
+            return end_pos, i, bool(is_ellipsis)
+    return end_pos, -1, False
+
+
+def _qualify_enum_default(py_default: str, type_text: str) -> str:
+    """
+    Qualify an enum default value with its module prefix when the type annotation uses a
+    qualified form like ``model.BookType``.
+
+    For example, if the default is ``BookType.L1_MBP`` and the type text
+    contains ``model.BookType``, returns ``model.BookType.L1_MBP``.
+
+    """
+    if "." not in py_default:
+        return py_default
+
+    dot_pos = py_default.index(".")
+    type_name = py_default[:dot_pos]
+
+    qualified_pattern = re.compile(rf"(\w+)\.{re.escape(type_name)}\b")
+    match = qualified_pattern.search(type_text)
+    if match:
+        module = match.group(1)
+        return f"{module}.{py_default}"
+
+    return py_default
 
 
 def add_missing_model_imports(content: str) -> str:
@@ -1396,6 +1949,10 @@ def normalize_stub_content(content: str) -> str:
         content = re.sub(r"\bnautilus_trader\.model\.", "model.", content)
     if "from nautilus_trader import infrastructure" in content:
         content = re.sub(r"\bnautilus_trader\.infrastructure\.", "infrastructure.", content)
+
+    # Fix malformed defaults where module prefix is prepended to ellipsis
+    # e.g. "model...." -> "..." (pyo3-stub-gen adds prefix to "..." repr)
+    content = re.sub(r"= \w+\.\.\.\.", "= ...", content)
 
     # Normalize multiple blank lines to maximum of two
     content = re.sub(r"\n{4,}", "\n\n\n", content)

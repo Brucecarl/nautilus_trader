@@ -318,7 +318,12 @@ pub trait Order: 'static + Send {
     /// Calculates potential overfill quantity without mutating order state.
     fn calculate_overfill(&self, fill_qty: Quantity) -> Quantity {
         let potential_filled = self.filled_qty() + fill_qty;
-        potential_filled.saturating_sub(self.quantity())
+        let quantity = self.quantity();
+        if potential_filled > quantity {
+            potential_filled - quantity
+        } else {
+            Quantity::zero(fill_qty.precision)
+        }
     }
 
     fn avg_px(&self) -> Option<f64>;
@@ -789,6 +794,8 @@ impl OrderCore {
             self.venue_order_id = Some(*venue_order_id);
             self.venue_order_ids.push(*venue_order_id);
         }
+
+        self.is_quote_quantity = event.is_quote_quantity;
     }
 
     fn filled(&mut self, event: &OrderFilled) {
@@ -1449,6 +1456,29 @@ mod tests {
     }
 
     #[rstest]
+    fn test_calculate_overfill_zero_after_fractional_partial_fill() {
+        let init = OrderInitializedBuilder::default()
+            .quantity(Quantity::from("1.000"))
+            .build()
+            .unwrap();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let partial_fill = OrderFilledBuilder::default()
+            .last_qty(Quantity::from("0.072"))
+            .build()
+            .unwrap();
+
+        let mut order: MarketOrder = init.into();
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Filled(partial_fill)).unwrap();
+
+        // After filling 0.072 of 1.000, another 0.072 fill should not overfill
+        let overfill = order.calculate_overfill(Quantity::from("0.072"));
+        assert_eq!(overfill, Quantity::from("0.000"));
+    }
+
+    #[rstest]
     fn test_duplicate_fill_rejected() {
         let init = OrderInitializedBuilder::default()
             .quantity(Quantity::from(100_000))
@@ -1583,5 +1613,58 @@ mod tests {
 
         assert_eq!(order.status(), OrderStatus::Triggered);
         assert_eq!(order.quantity(), Quantity::from(80_000));
+    }
+
+    #[rstest]
+    fn test_order_updated_with_is_quote_quantity_clears_flag() {
+        let init = OrderInitializedBuilder::default()
+            .quantity(Quantity::new(10.0, 6))
+            .quote_quantity(true)
+            .build()
+            .unwrap();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let updated = OrderUpdatedBuilder::default()
+            .quantity(Quantity::new(47.393_365, 6))
+            .is_quote_quantity(false)
+            .build()
+            .unwrap();
+
+        let mut order: MarketOrder = init.into();
+        assert!(order.is_quote_quantity());
+
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Updated(updated)).unwrap();
+
+        assert!(!order.is_quote_quantity());
+        assert_eq!(order.quantity(), Quantity::new(47.393_365, 6));
+        assert_eq!(order.leaves_qty(), Quantity::new(47.393_365, 6));
+    }
+
+    #[rstest]
+    fn test_order_updated_default_is_quote_quantity_clears_flag() {
+        let init = OrderInitializedBuilder::default()
+            .quantity(Quantity::new(10.0, 6))
+            .quote_quantity(true)
+            .build()
+            .unwrap();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        // Builder defaults is_quote_quantity to false
+        let updated = OrderUpdatedBuilder::default()
+            .quantity(Quantity::new(8.0, 6))
+            .build()
+            .unwrap();
+
+        let mut order: MarketOrder = init.into();
+        assert!(order.is_quote_quantity());
+
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Updated(updated)).unwrap();
+
+        assert!(!order.is_quote_quantity());
+        assert_eq!(order.quantity(), Quantity::new(8.0, 6));
     }
 }

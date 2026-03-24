@@ -7,14 +7,14 @@ GIT_TAG:=$(shell git rev-parse --abbrev-ref HEAD)
 IMAGE_FULL?=$(IMAGE):$(GIT_TAG)
 
 # Tool versions from Cargo.toml [workspace.metadata.tools]
-CARGO_AUDIT_VERSION := $(shell grep '^cargo-audit *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_DENY_VERSION := $(shell grep '^cargo-deny *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_EDIT_VERSION := $(shell grep '^cargo-edit *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_LLVM_COV_VERSION := $(shell grep '^cargo-llvm-cov *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_MACHETE_VERSION := $(shell grep '^cargo-machete *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_NEXTEST_VERSION := $(shell grep '^cargo-nextest *= *"' Cargo.toml | awk -F\" '{print $$2}')
-CARGO_VET_VERSION := $(shell grep '^cargo-vet *= *"' Cargo.toml | awk -F\" '{print $$2}')
-LYCHEE_VERSION := $(shell grep '^lychee *= *"' Cargo.toml | awk -F\" '{print $$2}')
+CARGO_AUDIT_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-audit)
+CARGO_DENY_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-deny)
+CARGO_EDIT_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-edit)
+CARGO_LLVM_COV_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-llvm-cov)
+CARGO_MACHETE_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-machete)
+CARGO_NEXTEST_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-nextest)
+CARGO_VET_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-vet)
+LYCHEE_VERSION := $(shell bash scripts/cargo-tool-version.sh lychee)
 UV_VERSION := $(shell cat uv-version | tr -d '\n')
 
 V = 0  # 0 / 1 - verbose mode
@@ -55,6 +55,10 @@ export CXX
 # abort on the first failure. When `false` (the default) the flag is included
 # allowing the full test suite to run.
 FAIL_FAST ?= false
+
+# NEXTEST_PROFILE selects the nextest profile from .config/nextest.toml.
+# CI should set NEXTEST_PROFILE=ci to limit parallelism on resource-constrained runners.
+NEXTEST_PROFILE ?= default
 
 # Select the appropriate flag for `cargo nextest` depending on FAIL_FAST.
 ifeq ($(FAIL_FAST),true)
@@ -488,10 +492,10 @@ cargo-test: check-nextest-installed
 cargo-test:  #-- Run all Rust tests (use EXTRA_FEATURES="feature1 feature2" or HYPERSYNC=true)
 ifeq ($(VERBOSE),true)
 	$(info $(M) Running Rust tests with verbose output...)
-	cargo nextest run --workspace --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --cargo-profile nextest --verbose
+	cargo nextest run --workspace --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest --verbose
 else
 	$(info $(M) Running Rust tests (showing summary and failures only)...)
-	cargo nextest run --workspace --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --cargo-profile nextest --status-level fail --final-status-level flaky
+	cargo nextest run --workspace --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest --status-level fail --final-status-level flaky
 endif
 
 .PHONY: cargo-test-extras
@@ -504,35 +508,35 @@ cargo-test-core: check-nextest-installed
 cargo-test-core:  #-- Run Rust tests for core crates only (excludes adapters)
 ifeq ($(VERBOSE),true)
 	$(info $(M) Running Rust tests for core crates...)
-	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --cargo-profile nextest --verbose
+	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest --verbose
 else
 	$(info $(M) Running Rust tests for core crates (showing summary and failures only)...)
-	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --cargo-profile nextest --status-level fail --final-status-level flaky
+	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest --status-level fail --final-status-level flaky
 endif
 
 .PHONY: cargo-test-core-debug
 cargo-test-core-debug: export RUST_BACKTRACE=1
 cargo-test-core-debug: check-nextest-installed
 cargo-test-core-debug:  #-- Run Rust tests for core crates (debug profile)
-	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG)
+	cargo nextest run $(foreach crate,$(CORE_CRATES),-p $(crate)) --features "$(CARGO_FEATURES)" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE)
 
 .PHONY: cargo-test-lib
 cargo-test-lib: export RUST_BACKTRACE=1
 cargo-test-lib: check-nextest-installed
 cargo-test-lib:  #-- Run Rust library tests only with high precision
-	cargo nextest run --lib --workspace --no-default-features --features "ffi,python,high-precision,streaming,defi,stubs" $(FAIL_FAST_FLAG) --cargo-profile nextest
+	cargo nextest run --lib --workspace --no-default-features --features "ffi,python,high-precision,streaming,defi,stubs" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest
 
 .PHONY: cargo-test-standard-precision
 cargo-test-standard-precision: export RUST_BACKTRACE=1
 cargo-test-standard-precision: check-nextest-installed
 cargo-test-standard-precision:  #-- Run Rust tests with standard precision (debug profile)
-	cargo nextest run --workspace --features "ffi,python" $(FAIL_FAST_FLAG)
+	cargo nextest run --workspace --features "ffi,python" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE)
 
 .PHONY: cargo-test-debug
 cargo-test-debug: export RUST_BACKTRACE=1
 cargo-test-debug: check-nextest-installed
 cargo-test-debug:  #-- Run Rust tests with high precision (debug profile)
-	cargo nextest run --workspace --features "ffi,python,high-precision,streaming,defi" $(FAIL_FAST_FLAG)
+	cargo nextest run --workspace --features "ffi,python,high-precision,streaming,defi" $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE)
 
 .PHONY: cargo-test-coverage
 cargo-test-coverage: check-nextest-installed check-llvm-cov-installed
@@ -557,7 +561,7 @@ cargo-test-coverage:  #-- Run Rust tests with coverage reporting
 cargo-test-crate-%: export RUST_BACKTRACE=1
 cargo-test-crate-%: check-nextest-installed
 cargo-test-crate-%:  #-- Run Rust tests for a specific crate (usage: make cargo-test-crate-<crate_name>)
-	cargo nextest run --lib $(FAIL_FAST_FLAG) --cargo-profile nextest -p $* $(if $(FEATURES),--features "$(FEATURES)")
+	cargo nextest run --lib $(FAIL_FAST_FLAG) --profile $(NEXTEST_PROFILE) --cargo-profile nextest -p $* $(if $(FEATURES),--features "$(FEATURES)")
 
 .PHONY: cargo-test-coverage-crate-%
 cargo-test-coverage-crate-%: export RUST_BACKTRACE=1

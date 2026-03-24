@@ -54,11 +54,12 @@ use nautilus_core::{
 };
 use nautilus_model::{
     data::{
-        Bar, BarType, BookOrder, FundingRateUpdate, IndexPriceUpdate, MarkPriceUpdate, TradeTick,
+        Bar, BarType, BookOrder, FundingRateUpdate, IndexPriceUpdate, MarkPriceUpdate,
+        OrderBookDelta, OrderBookDeltas, TradeTick,
     },
     enums::{
-        AggregationSource, BarAggregation, BookType, OrderSide, OrderType, PositionSide,
-        TimeInForce, TriggerType,
+        AggregationSource, BarAggregation, BookAction, BookType, OrderSide, OrderType,
+        PositionSide, RecordFlag, TimeInForce, TriggerType,
     },
     events::AccountState,
     identifiers::{AccountId, ClientOrderId, InstrumentId},
@@ -199,6 +200,12 @@ pub static OKX_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
 });
 
 const OKX_GLOBAL_RATE_KEY: &str = "okx:global";
+
+/// OKX returns at most 100 records per page for order, fill, and algo endpoints.
+const OKX_PAGE_SIZE: usize = 100;
+
+/// Safety cap on paginated reconciliation fetches to avoid unbounded loops.
+const MAX_RECONCILIATION_PAGES: usize = 50;
 
 /// Represents an OKX HTTP response.
 #[derive(Debug, Serialize, Deserialize)]
@@ -1726,6 +1733,101 @@ impl OKXHttpClient {
         Ok(book)
     }
 
+    /// Requests an order book snapshot as `OrderBookDeltas` for the `instrument_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or parsing fails.
+    pub async fn request_orderbook_snapshot(
+        &self,
+        instrument_id: InstrumentId,
+        depth: Option<u32>,
+    ) -> anyhow::Result<OrderBookDeltas> {
+        let inst = self.instrument_from_cache(instrument_id.symbol.inner())?;
+        let price_precision = inst.price_precision();
+        let size_precision = inst.size_precision();
+
+        let params = GetOrderBookParams {
+            inst_id: instrument_id.symbol.to_string(),
+            sz: depth,
+        };
+
+        let resp = self
+            .inner
+            .get_order_book(params)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let snapshot = resp
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No order book returned from OKX"))?;
+
+        let ts_event = UnixNanos::from(snapshot.ts * NANOSECONDS_IN_MILLISECOND);
+        let total_levels = snapshot.bids.len() + snapshot.asks.len();
+        let mut deltas = Vec::with_capacity(total_levels + 1);
+
+        let mut clear = OrderBookDelta::clear(instrument_id, 0, ts_event, ts_event);
+
+        if total_levels == 0 {
+            clear.flags |= RecordFlag::F_LAST as u8;
+        }
+        deltas.push(clear);
+
+        let mut processed = 0_usize;
+        for (i, level) in snapshot.bids.iter().enumerate() {
+            let price = parse_price(&level.0, price_precision)?;
+            let size = parse_quantity(&level.1, size_precision)?;
+            let order = BookOrder::new(OrderSide::Buy, price, size, i as u64);
+            processed += 1;
+            let mut flags = RecordFlag::F_SNAPSHOT as u8;
+
+            if processed == total_levels {
+                flags |= RecordFlag::F_LAST as u8;
+            }
+            deltas.push(OrderBookDelta::new(
+                instrument_id,
+                BookAction::Add,
+                order,
+                flags,
+                0,
+                ts_event,
+                ts_event,
+            ));
+        }
+
+        let bids_len = snapshot.bids.len();
+        for (i, level) in snapshot.asks.iter().enumerate() {
+            let price = parse_price(&level.0, price_precision)?;
+            let size = parse_quantity(&level.1, size_precision)?;
+            let order = BookOrder::new(OrderSide::Sell, price, size, (bids_len + i) as u64);
+            processed += 1;
+            let mut flags = RecordFlag::F_SNAPSHOT as u8;
+
+            if processed == total_levels {
+                flags |= RecordFlag::F_LAST as u8;
+            }
+            deltas.push(OrderBookDelta::new(
+                instrument_id,
+                BookAction::Add,
+                order,
+                flags,
+                0,
+                ts_event,
+                ts_event,
+            ));
+        }
+
+        log::info!(
+            "Fetched order book snapshot for {} with {} bids and {} asks",
+            instrument_id,
+            snapshot.bids.len(),
+            snapshot.asks.len(),
+        );
+
+        OrderBookDeltas::new_checked(instrument_id, deltas)
+            .context("failed to assemble OrderBookDeltas from OKX snapshot")
+    }
+
     /// Requests historical funding rates for the `instrument_id`.
     ///
     /// # Errors
@@ -2777,8 +2879,6 @@ impl OKXHttpClient {
         open_only: bool,
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
-        let mut history_params = GetOrderHistoryParamsBuilder::default();
-
         let instrument_type = if let Some(instrument_type) = instrument_type {
             instrument_type
         } else {
@@ -2789,48 +2889,31 @@ impl OKXHttpClient {
             okx_instrument_type(&instrument)?
         };
 
-        history_params.inst_type(instrument_type);
+        let mut history_base = GetOrderHistoryParamsBuilder::default();
+        history_base.inst_type(instrument_type);
 
         if let Some(instrument_id) = instrument_id.as_ref() {
-            history_params.inst_id(instrument_id.symbol.inner().to_string());
+            history_base.inst_id(instrument_id.symbol.inner().to_string());
         }
+        let history_base = history_base.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        if let Some(limit) = limit {
-            history_params.limit(limit);
-        }
-
-        let history_params = history_params.build().map_err(|e| anyhow::anyhow!(e))?;
-
-        let mut pending_params = GetOrderListParamsBuilder::default();
-        pending_params.inst_type(instrument_type);
+        let mut pending_base = GetOrderListParamsBuilder::default();
+        pending_base.inst_type(instrument_type);
 
         if let Some(instrument_id) = instrument_id.as_ref() {
-            pending_params.inst_id(instrument_id.symbol.inner().to_string());
+            pending_base.inst_id(instrument_id.symbol.inner().to_string());
         }
-
-        if let Some(limit) = limit {
-            pending_params.limit(limit);
-        }
-
-        let pending_params = pending_params.build().map_err(|e| anyhow::anyhow!(e))?;
+        let pending_base = pending_base.build().map_err(|e| anyhow::anyhow!(e))?;
 
         let combined_resp = if open_only {
-            // Only request pending/open orders
-            self.inner
-                .get_orders_pending(pending_params)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?
+            self.paginate_orders_pending(&pending_base, limit).await?
         } else {
-            // Make both requests concurrently
-            let (history_resp, pending_resp) = tokio::try_join!(
-                self.inner.get_orders_history(history_params),
-                self.inner.get_orders_pending(pending_params)
-            )
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-            // Combine both responses
-            let mut combined_resp = history_resp;
-            combined_resp.extend(pending_resp);
+            let (history, pending) = tokio::try_join!(
+                self.paginate_orders_history(&history_base, limit),
+                self.paginate_orders_pending(&pending_base, limit),
+            )?;
+            let mut combined_resp = history;
+            combined_resp.extend(pending);
             combined_resp
         };
 
@@ -2908,6 +2991,211 @@ impl OKXHttpClient {
         Ok(reports)
     }
 
+    // Paginates through order history using `ord_id` as the cursor
+    async fn paginate_orders_history(
+        &self,
+        base: &GetOrderHistoryParams,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<OKXOrderHistory>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..MAX_RECONCILIATION_PAGES {
+            let mut params = base.clone();
+            params.after = cursor.take();
+
+            let page = self
+                .inner
+                .get_orders_history(params)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let page_len = page.len();
+            cursor = page.last().map(|o| o.ord_id.to_string());
+            all.extend(page);
+
+            if page_len < OKX_PAGE_SIZE {
+                break;
+            }
+
+            if let Some(lim) = limit
+                && all.len() >= lim as usize
+            {
+                break;
+            }
+        }
+
+        if let Some(lim) = limit {
+            all.truncate(lim as usize);
+        }
+
+        Ok(all)
+    }
+
+    // Paginates through pending orders using `ord_id` as the cursor
+    async fn paginate_orders_pending(
+        &self,
+        base: &GetOrderListParams,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<OKXOrderHistory>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..MAX_RECONCILIATION_PAGES {
+            let mut params = base.clone();
+            params.after = cursor.take();
+
+            let page = self
+                .inner
+                .get_orders_pending(params)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let page_len = page.len();
+            cursor = page.last().map(|o| o.ord_id.to_string());
+            all.extend(page);
+
+            if page_len < OKX_PAGE_SIZE {
+                break;
+            }
+
+            if let Some(lim) = limit
+                && all.len() >= lim as usize
+            {
+                break;
+            }
+        }
+
+        if let Some(lim) = limit {
+            all.truncate(lim as usize);
+        }
+
+        Ok(all)
+    }
+
+    // Paginates through transaction details (fills) using `bill_id` as the cursor
+    async fn paginate_fills(
+        &self,
+        base: &GetTransactionDetailsParams,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<OKXTransactionDetail>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..MAX_RECONCILIATION_PAGES {
+            let mut params = base.clone();
+            params.after = cursor.take();
+
+            let page = self
+                .inner
+                .get_fills(params)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let page_len = page.len();
+            cursor = page.last().map(|o| o.bill_id.to_string());
+            all.extend(page);
+
+            if page_len < OKX_PAGE_SIZE {
+                break;
+            }
+
+            if let Some(lim) = limit
+                && all.len() >= lim as usize
+            {
+                break;
+            }
+        }
+
+        if let Some(lim) = limit {
+            all.truncate(lim as usize);
+        }
+
+        Ok(all)
+    }
+
+    // Paginates through pending algo orders using `algo_id` as the cursor
+    async fn paginate_algo_pending(
+        &self,
+        base: &GetAlgoOrdersParams,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<OKXOrderAlgo>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..MAX_RECONCILIATION_PAGES {
+            let mut params = base.clone();
+            params.after = cursor.take();
+
+            let page = match self.inner.get_order_algo_pending(params).await {
+                Ok(result) => result,
+                Err(OKXHttpError::UnexpectedStatus { status, .. })
+                    if status == StatusCode::NOT_FOUND =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let page_len = page.len();
+            cursor = page.last().map(|o| o.algo_id.clone());
+            all.extend(page);
+
+            if page_len < OKX_PAGE_SIZE {
+                break;
+            }
+
+            if let Some(lim) = limit
+                && all.len() >= lim
+            {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
+    // Paginates through historical algo orders using `algo_id` as the cursor
+    async fn paginate_algo_history(
+        &self,
+        base: &GetAlgoOrdersParams,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<OKXOrderAlgo>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..MAX_RECONCILIATION_PAGES {
+            let mut params = base.clone();
+            params.after = cursor.take();
+
+            let page = match self.inner.get_order_algo_history(params).await {
+                Ok(result) => result,
+                Err(OKXHttpError::UnexpectedStatus { status, .. })
+                    if status == StatusCode::NOT_FOUND =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let page_len = page.len();
+            cursor = page.last().map(|o| o.algo_id.clone());
+            all.extend(page);
+
+            if page_len < OKX_PAGE_SIZE {
+                break;
+            }
+
+            if let Some(lim) = limit
+                && all.len() >= lim
+            {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
     /// Requests fill reports (transaction details) for the given parameters.
     ///
     /// # Errors
@@ -2947,17 +3235,9 @@ impl OKXHttpClient {
             params.inst_id(instrument_id.symbol.inner().to_string());
         }
 
-        if let Some(limit) = limit {
-            params.limit(limit);
-        }
-
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let resp = self
-            .inner
-            .get_fills(params)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let resp = self.paginate_fills(&params, limit).await?;
 
         // Prepare time range filter
         let start_ns = start.map(UnixNanos::from);
@@ -3237,9 +3517,22 @@ impl OKXHttpClient {
             )
             .await?;
 
-        resp.into_iter()
+        let item = resp
+            .into_iter()
             .next()
-            .ok_or_else(|| OKXHttpError::ValidationError("Empty response".to_string()))
+            .ok_or_else(|| OKXHttpError::ValidationError("Empty response".to_string()))?;
+
+        if let Some(ref code) = item.s_code
+            && code != "0"
+        {
+            let msg = item.s_msg.clone().unwrap_or_default();
+            return Err(OKXHttpError::OkxError {
+                error_code: code.clone(),
+                message: msg,
+            });
+        }
+
+        Ok(item)
     }
 
     /// Cancels an algo order via HTTP.
@@ -3271,12 +3564,28 @@ impl OKXHttpClient {
             )
             .await?;
 
-        resp.into_iter()
+        let item = resp
+            .into_iter()
             .next()
-            .ok_or_else(|| OKXHttpError::ValidationError("Empty response".to_string()))
+            .ok_or_else(|| OKXHttpError::ValidationError("Empty response".to_string()))?;
+
+        if let Some(ref code) = item.s_code
+            && code != "0"
+        {
+            let msg = item.s_msg.clone().unwrap_or_default();
+            return Err(OKXHttpError::OkxError {
+                error_code: code.clone(),
+                message: msg,
+            });
+        }
+
+        Ok(item)
     }
 
     /// Cancels multiple algo orders via HTTP in a single request.
+    ///
+    /// Items with non-zero `sCode` are logged as warnings but do not
+    /// fail the entire batch.
     ///
     /// # Errors
     ///
@@ -3296,7 +3605,8 @@ impl OKXHttpClient {
         let body =
             serde_json::to_vec(&requests).map_err(|e| OKXHttpError::JsonError(e.to_string()))?;
 
-        self.inner
+        let resp: Vec<OKXCancelAlgoOrderResponse> = self
+            .inner
             .send_request::<_, ()>(
                 Method::POST,
                 "/api/v5/trade/cancel-algos",
@@ -3304,12 +3614,27 @@ impl OKXHttpClient {
                 Some(body),
                 true,
             )
-            .await
+            .await?;
+
+        for item in &resp {
+            if let Some(ref code) = item.s_code
+                && code != "0"
+            {
+                let msg = item.s_msg.as_deref().unwrap_or("");
+                log::warn!(
+                    "Algo cancel rejected: algo_id={} sCode={code} sMsg={msg}",
+                    item.algo_id
+                );
+            }
+        }
+
+        Ok(resp)
     }
 
     /// Cancels advance algo orders (trailing stop, iceberg, TWAP) via HTTP.
     ///
     /// These order types cannot use the standard `cancel-algos` endpoint.
+    /// Items with non-zero `sCode` are logged as warnings.
     ///
     /// # Errors
     ///
@@ -3329,7 +3654,8 @@ impl OKXHttpClient {
         let body =
             serde_json::to_vec(&requests).map_err(|e| OKXHttpError::JsonError(e.to_string()))?;
 
-        self.inner
+        let resp: Vec<OKXCancelAlgoOrderResponse> = self
+            .inner
             .send_request::<_, ()>(
                 Method::POST,
                 "/api/v5/trade/cancel-advance-algos",
@@ -3337,7 +3663,21 @@ impl OKXHttpClient {
                 Some(body),
                 true,
             )
-            .await
+            .await?;
+
+        for item in &resp {
+            if let Some(ref code) = item.s_code
+                && code != "0"
+            {
+                let msg = item.s_msg.as_deref().unwrap_or("");
+                log::warn!(
+                    "Advance algo cancel rejected: algo_id={} sCode={code} sMsg={msg}",
+                    item.algo_id
+                );
+            }
+        }
+
+        Ok(resp)
     }
 
     /// Amends an algo order via HTTP.
@@ -3805,23 +4145,12 @@ impl OKXHttpClient {
                 params_builder.state(state);
             }
 
-            if let Some(limit) = limit {
-                params_builder.limit(limit);
-            }
-
             let params = params_builder
                 .build()
                 .map_err(|e| anyhow::anyhow!(format!("Failed to build algo order params: {e}")))?;
 
-            let pending = match self.inner.get_order_algo_pending(params.clone()).await {
-                Ok(result) => result,
-                Err(OKXHttpError::UnexpectedStatus { status, .. })
-                    if status == StatusCode::NOT_FOUND =>
-                {
-                    Vec::new()
-                }
-                Err(e) => return Err(e.into()),
-            };
+            let remaining = limit.map(|l| (l as usize).saturating_sub(reports.len()));
+            let pending = self.paginate_algo_pending(&params, remaining).await?;
             self.collect_algo_reports(
                 account_id,
                 &pending,
@@ -3836,15 +4165,15 @@ impl OKXHttpClient {
                 return Ok(reports);
             }
 
-            let history = match self.inner.get_order_algo_history(params).await {
-                Ok(result) => result,
-                Err(OKXHttpError::UnexpectedStatus { status, .. })
-                    if status == StatusCode::NOT_FOUND =>
-                {
-                    Vec::new()
-                }
-                Err(e) => return Err(e.into()),
-            };
+            if let Some(lim) = limit
+                && reports.len() >= lim as usize
+            {
+                reports.truncate(lim as usize);
+                return Ok(reports);
+            }
+
+            let remaining = limit.map(|l| (l as usize).saturating_sub(reports.len()));
+            let history = self.paginate_algo_history(&params, remaining).await?;
             self.collect_algo_reports(
                 account_id,
                 &history,
@@ -3856,6 +4185,13 @@ impl OKXHttpClient {
             .await?;
 
             if has_specific_lookup && !reports.is_empty() {
+                return Ok(reports);
+            }
+
+            if let Some(lim) = limit
+                && reports.len() >= lim as usize
+            {
+                reports.truncate(lim as usize);
                 return Ok(reports);
             }
         }

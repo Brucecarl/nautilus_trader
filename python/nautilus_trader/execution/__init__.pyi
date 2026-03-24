@@ -28,33 +28,35 @@ __all__ = [
 @typing.final
 class BestPriceFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class CompetitionAwareFillModel:
     def __init__(
         self,
-        prob_fill_on_limit: float,
-        prob_slippage: float,
-        random_seed: int | None,
-        liquidity_factor: float,
+        prob_fill_on_limit: float = 1.0,
+        prob_slippage: float = 0.0,
+        random_seed: int | None = None,
+        liquidity_factor: float = 0.3,
     ) -> None: ...
 
 @typing.final
 class DefaultFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class FixedFeeModel:
-    def __init__(self, commission: model.Money, change_commission_once: bool | None) -> None: ...
+    def __init__(
+        self, commission: model.Money, change_commission_once: bool | None = None
+    ) -> None: ...
 
 @typing.final
 class LimitOrderPartialFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
@@ -64,13 +66,13 @@ class MakerTakerFeeModel:
 @typing.final
 class MarketHoursFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class OneTickSlippageFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
@@ -80,41 +82,41 @@ class PerContractFeeModel:
 @typing.final
 class ProbabilisticFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class SizeAwareFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class StaticLatencyModel:
     def __init__(
         self,
-        base_latency_nanos: int,
-        insert_latency_nanos: int,
-        update_latency_nanos: int,
-        cancel_latency_nanos: int,
+        base_latency_nanos: int = 0,
+        insert_latency_nanos: int = 0,
+        update_latency_nanos: int = 0,
+        cancel_latency_nanos: int = 0,
     ) -> None: ...
 
 @typing.final
 class ThreeTierFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class TwoTierFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 @typing.final
 class VolumeSensitiveFillModel:
     def __init__(
-        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None
+        self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
     ) -> None: ...
 
 def adjust_fills_for_partial_window(
@@ -124,5 +126,5 @@ def calculate_reconciliation_price(
     current_position_qty: decimal.Decimal,
     current_position_avg_px: decimal.Decimal | None,
     target_position_qty: decimal.Decimal,
-    target_position_avg_px: decimal.Decimal | None,
+    target_position_avg_px: decimal.Decimal | None = ...,
 ) -> decimal.Decimal | None: ...

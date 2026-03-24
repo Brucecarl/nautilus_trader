@@ -28,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use anyhow::Context;
 use async_trait::async_trait;
 use nautilus_common::{
@@ -50,6 +50,7 @@ use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
     enums::{AccountType, CurrencyType, OmsType, OrderSide, OrderStatus, OrderType, TimeInForce},
+    events::{OrderEventAny, OrderUpdated},
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, StrategyId, Venue, VenueOrderId,
     },
@@ -118,6 +119,7 @@ pub struct PolymarketExecutionClient {
     fill_tracker: Arc<OrderFillTrackerMap>,
     pending_fills: Arc<Mutex<FifoCacheMap<VenueOrderId, Vec<FillReport>, 1_000>>>,
     pending_order_reports: Arc<Mutex<FifoCacheMap<VenueOrderId, Vec<OrderStatusReport>, 1_000>>>,
+    pending_cancels: Arc<Mutex<AHashSet<ClientOrderId>>>,
 }
 
 impl PolymarketExecutionClient {
@@ -220,6 +222,7 @@ impl PolymarketExecutionClient {
             fill_tracker: Arc::new(OrderFillTrackerMap::new()),
             pending_fills: Arc::new(Mutex::new(FifoCacheMap::default())),
             pending_order_reports: Arc::new(Mutex::new(FifoCacheMap::default())),
+            pending_cancels: Arc::new(Mutex::new(AHashSet::new())),
         })
     }
 
@@ -575,6 +578,7 @@ impl PolymarketExecutionClient {
                                 let commission_value =
                                     compute_commission(fee_bps, size, price_dec);
                                 let usdc = get_usdc_currency();
+
                                 let fill_report = FillReport {
                                     account_id,
                                     instrument_id: instrument.id(),
@@ -591,6 +595,7 @@ impl PolymarketExecutionClient {
                                     client_order_id: None,
                                     venue_position_id: None,
                                 };
+
                                 let is_accepted = fill_tracker.contains(&venue_order_id);
                                 if is_accepted {
                                     fill_tracker.record_fill(
@@ -640,6 +645,7 @@ impl PolymarketExecutionClient {
 
     fn build_neg_risk_index(&mut self) {
         self.neg_risk_index.clear();
+
         for instrument in self.provider.store().list_all() {
             if let InstrumentAny::BinaryOption(inst) = instrument {
                 let neg_risk = inst
@@ -681,6 +687,7 @@ impl PolymarketExecutionClient {
         let fill_tracker = self.fill_tracker.clone();
         let pending_fills = self.pending_fills.clone();
         let pending_order_reports = self.pending_order_reports.clone();
+        let pending_cancels = self.pending_cancels.clone();
         let account_id = self.core.account_id;
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
@@ -701,7 +708,7 @@ impl PolymarketExecutionClient {
                 .await
             {
                 Ok(response) => {
-                    handle_order_response(
+                    if let Some((order_id_str, venue_order_id)) = handle_order_response(
                         Ok(response),
                         &order,
                         &emitter,
@@ -709,10 +716,21 @@ impl PolymarketExecutionClient {
                         &fill_tracker,
                         &pending_fills,
                         &pending_order_reports,
+                        &pending_cancels,
                         account_id,
                         size_precision,
                         price_precision,
-                    );
+                    ) {
+                        execute_deferred_cancel(
+                            &submitter,
+                            &order,
+                            &order_id_str,
+                            venue_order_id,
+                            &emitter,
+                            clock,
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => {
                     let ts = clock.get_time_ns();
@@ -739,6 +757,7 @@ impl PolymarketExecutionClient {
         let tick_decimals = instrument.price_precision() as u32;
         let side = order.order_side();
         let amount = order.quantity();
+        let is_quote_qty = order.is_quote_quantity();
 
         let submitter = self.submitter.clone();
         let emitter = self.emitter.clone();
@@ -746,6 +765,7 @@ impl PolymarketExecutionClient {
         let fill_tracker = self.fill_tracker.clone();
         let pending_fills = self.pending_fills.clone();
         let pending_order_reports = self.pending_order_reports.clone();
+        let pending_cancels = self.pending_cancels.clone();
         let account_id = self.core.account_id;
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
@@ -755,9 +775,60 @@ impl PolymarketExecutionClient {
                 .submit_market_order(&token_id, side, amount, neg_risk, tick_decimals)
                 .await
             {
-                Ok(response) => {
+                Ok((response, expected_base_qty)) => {
+                    let mut order = order;
                     emitter.emit_order_submitted(&order);
-                    handle_order_response(
+
+                    // Convert quote quantity to base only after successful submission
+                    if response.success
+                        && is_quote_qty
+                        && side == OrderSide::Buy
+                        && !expected_base_qty.is_zero()
+                        && let Ok(base_qty) =
+                            Quantity::from_decimal_dp(expected_base_qty, size_precision)
+                    {
+                        log::info!(
+                            "Converted {} quote quantity {} to base quantity {} \
+                             (expected from book walk)",
+                            order.instrument_id(),
+                            amount,
+                            base_qty,
+                        );
+
+                        let ts_now = clock.get_time_ns();
+                        let updated = OrderUpdated::new(
+                            order.trader_id(),
+                            order.strategy_id(),
+                            order.instrument_id(),
+                            order.client_order_id(),
+                            base_qty,
+                            UUID4::new(),
+                            ts_now,
+                            ts_now,
+                            false,
+                            order.venue_order_id(),
+                            order.account_id(),
+                            order.price(),
+                            None,
+                            None,
+                            false, // is_quote_quantity
+                        );
+
+                        let event = OrderEventAny::Updated(updated);
+                        emitter.send_order_event(event.clone());
+
+                        if let Err(e) = order.apply(event) {
+                            log::error!("Failed to apply quote-to-base OrderUpdated: {e}");
+                        }
+                    }
+
+                    let fok_order_id = response
+                        .order_id
+                        .as_ref()
+                        .filter(|_| response.success)
+                        .cloned();
+
+                    if let Some((order_id_str, venue_order_id)) = handle_order_response(
                         Ok(response),
                         &order,
                         &emitter,
@@ -765,10 +836,37 @@ impl PolymarketExecutionClient {
                         &fill_tracker,
                         &pending_fills,
                         &pending_order_reports,
+                        &pending_cancels,
                         account_id,
                         size_precision,
                         price_precision,
-                    );
+                    ) {
+                        execute_deferred_cancel(
+                            &submitter,
+                            &order,
+                            &order_id_str,
+                            venue_order_id,
+                            &emitter,
+                            clock,
+                        )
+                        .await;
+                    }
+
+                    if let Some(order_id) = fok_order_id {
+                        check_fok_status(
+                            &submitter,
+                            &order_id,
+                            &fill_tracker,
+                            &emitter,
+                            account_id,
+                            order.instrument_id(),
+                            order.order_side(),
+                            size_precision,
+                            price_precision,
+                            clock,
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => {
                     let ts = clock.get_time_ns();
@@ -995,8 +1093,26 @@ impl ExecutionClient for PolymarketExecutionClient {
         let venue_order_id = match order_ref.venue_order_id() {
             Some(id) => id,
             None => {
-                log::warn!("No venue_order_id for cancel: {}", cmd.client_order_id);
-                return Ok(());
+                // Check cache index: submit may have cached it before OrderAccepted was applied
+                match self
+                    .core
+                    .cache()
+                    .venue_order_id(&cmd.client_order_id)
+                    .copied()
+                {
+                    Some(id) => id,
+                    None => {
+                        log::info!(
+                            "Cancel for {} deferred, venue_order_id not yet available",
+                            cmd.client_order_id
+                        );
+                        self.pending_cancels
+                            .lock()
+                            .expect(MUTEX_POISONED)
+                            .insert(cmd.client_order_id);
+                        return Ok(());
+                    }
+                }
             }
         };
 
@@ -1384,10 +1500,6 @@ impl ExecutionClient for PolymarketExecutionClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn process_cancel_result(
     response: &CancelResponse,
     venue_order_id_str: &str,
@@ -1422,10 +1534,11 @@ fn handle_order_response(
     fill_tracker: &Arc<OrderFillTrackerMap>,
     pending_fills: &Arc<Mutex<FifoCacheMap<VenueOrderId, Vec<FillReport>, 1_000>>>,
     pending_order_reports: &Arc<Mutex<FifoCacheMap<VenueOrderId, Vec<OrderStatusReport>, 1_000>>>,
+    pending_cancels: &Arc<Mutex<AHashSet<ClientOrderId>>>,
     account_id: AccountId,
     size_precision: u8,
     price_precision: u8,
-) {
+) -> Option<(String, VenueOrderId)> {
     match result {
         Ok(response) => {
             if response.success {
@@ -1495,6 +1608,20 @@ fn handle_order_response(
                             }
                         }
                     }
+
+                    // Check if cancel was requested during the HTTP round-trip
+                    if pending_cancels
+                        .lock()
+                        .expect(MUTEX_POISONED)
+                        .remove(&order.client_order_id())
+                    {
+                        log::info!(
+                            "Order {} has pending cancel, issuing deferred cancel for {}",
+                            order.client_order_id(),
+                            venue_order_id
+                        );
+                        return Some((order_id, venue_order_id));
+                    }
                 } else {
                     log::warn!(
                         "Order accepted but no order_id returned for {}",
@@ -1507,13 +1634,145 @@ fn handle_order_response(
                     .unwrap_or_else(|| "unknown error".to_string());
                 let ts = clock.get_time_ns();
                 emitter.emit_order_rejected(order, &reason, ts, false);
+                pending_cancels
+                    .lock()
+                    .expect(MUTEX_POISONED)
+                    .remove(&order.client_order_id());
             }
         }
         Err(e) => {
             let ts = clock.get_time_ns();
             emitter.emit_order_rejected(order, &format!("HTTP request failed: {e}"), ts, false);
+            pending_cancels
+                .lock()
+                .expect(MUTEX_POISONED)
+                .remove(&order.client_order_id());
         }
     }
+    None
+}
+
+async fn execute_deferred_cancel(
+    submitter: &OrderSubmitter,
+    order: &OrderAny,
+    order_id_str: &str,
+    venue_order_id: VenueOrderId,
+    emitter: &ExecutionEventEmitter,
+    clock: &'static AtomicTime,
+) {
+    match submitter.cancel_order(order_id_str).await {
+        Ok(response) => {
+            process_cancel_result(
+                &response,
+                order_id_str,
+                order,
+                venue_order_id,
+                emitter,
+                clock,
+            );
+        }
+        Err(e) => {
+            let ts = clock.get_time_ns();
+            emitter.emit_order_cancel_rejected(
+                order,
+                Some(venue_order_id),
+                &format!("Deferred cancel failed: {e}"),
+                ts,
+            );
+        }
+    }
+}
+
+/// Deferred FOK status check.
+///
+/// Waits 5 seconds then queries the CLOB REST API for the order status.
+/// If the order has reached a terminal state that the WS stream missed
+/// (e.g. UNMATCHED for an unfilled FOK), emits an order status report
+/// so the engine can reconcile it.
+#[allow(clippy::too_many_arguments)]
+async fn check_fok_status(
+    submitter: &OrderSubmitter,
+    order_id: &str,
+    fill_tracker: &Arc<OrderFillTrackerMap>,
+    emitter: &ExecutionEventEmitter,
+    account_id: AccountId,
+    instrument_id: InstrumentId,
+    order_side: OrderSide,
+    size_precision: u8,
+    price_precision: u8,
+    clock: &'static AtomicTime,
+) {
+    const FOK_CHECK_DELAY: Duration = Duration::from_secs(5);
+
+    tokio::time::sleep(FOK_CHECK_DELAY).await;
+
+    let venue_order_id = VenueOrderId::from(order_id);
+    if fill_tracker.has_fills_or_settled(&venue_order_id) {
+        return;
+    }
+
+    log::info!("FOK order {order_id} unresolved after 5s, checking REST status");
+
+    let venue_order = match submitter.get_order(order_id).await {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("FOK status check failed for {order_id}: {e}");
+            return;
+        }
+    };
+
+    let order_status = OrderStatus::from(venue_order.status);
+
+    if !matches!(
+        order_status,
+        OrderStatus::Rejected | OrderStatus::Canceled | OrderStatus::Expired | OrderStatus::Filled
+    ) {
+        return;
+    }
+
+    let quantity = Quantity::new(
+        venue_order
+            .original_size
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+        size_precision,
+    );
+    let filled_qty = Quantity::new(
+        venue_order
+            .size_matched
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+        size_precision,
+    );
+    let price = Price::new(
+        venue_order.price.to_string().parse::<f64>().unwrap_or(0.0),
+        price_precision,
+    );
+
+    let ts = clock.get_time_ns();
+    let mut report = OrderStatusReport::new(
+        account_id,
+        instrument_id,
+        None,
+        venue_order_id,
+        order_side,
+        OrderType::Limit,
+        TimeInForce::Ioc,
+        order_status,
+        quantity,
+        filled_qty,
+        ts,
+        ts,
+        ts,
+        None,
+    );
+    report.price = Some(price);
+
+    log::info!("FOK order {order_id} resolved via REST as {order_status:?}");
+
+    emitter.send_order_status_report(report);
 }
 
 fn get_usdc_currency() -> Currency {

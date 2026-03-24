@@ -21,14 +21,19 @@
 //! Uses [`RetryManager`] from `nautilus-network` with exponential backoff for
 //! transient HTTP failures (timeouts, 5xx, rate limits).
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use dashmap::DashMap;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{OrderSide, TimeInForce},
     types::{Price, Quantity},
 };
 use nautilus_network::retry::{RetryConfig, RetryManager};
+use rust_decimal::Decimal;
 
 use super::{order_builder::PolymarketOrderBuilder, parse::calculate_market_price};
 use crate::{
@@ -36,6 +41,7 @@ use crate::{
     http::{
         clob::PolymarketClobHttpClient,
         error::Error,
+        models::PolymarketOpenOrder,
         query::{CancelResponse, OrderResponse},
     },
 };
@@ -47,11 +53,15 @@ use crate::{
 /// - Expiration calculation
 /// - Order building and EIP-712 signing (via [`PolymarketOrderBuilder`])
 /// - HTTP posting to the CLOB API with automatic retry on transient failures
+///
+/// Fee rates are cached per token with a 5-minute TTL to avoid stale values
+/// if the account's volume tier changes during a session.
 #[derive(Debug, Clone)]
 pub(crate) struct OrderSubmitter {
     http_client: PolymarketClobHttpClient,
     order_builder: Arc<PolymarketOrderBuilder>,
     retry_manager: Arc<RetryManager<Error>>,
+    fee_rate_cache: Arc<DashMap<String, (Decimal, Instant)>>,
 }
 
 impl OrderSubmitter {
@@ -64,6 +74,42 @@ impl OrderSubmitter {
             http_client,
             order_builder,
             retry_manager: Arc::new(RetryManager::new(retry_config)),
+            fee_rate_cache: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Returns the fee rate in basis points for a token, fetching from the API on cache miss
+    /// or when the cached value is older than 5 minutes.
+    ///
+    /// Falls back to the stale cached value if the refresh fails, so transient API
+    /// outages do not block order submission.
+    async fn get_fee_rate_bps(&self, token_id: &str) -> anyhow::Result<Decimal> {
+        const TTL: Duration = Duration::from_secs(300);
+
+        if let Some(entry) = self.fee_rate_cache.get(token_id) {
+            let (rate, fetched_at) = entry.value();
+            if fetched_at.elapsed() < TTL {
+                return Ok(*rate);
+            }
+        }
+
+        match self.http_client.get_fee_rate(token_id).await {
+            Ok(response) => {
+                self.fee_rate_cache
+                    .insert(token_id.to_string(), (response.base_fee, Instant::now()));
+                Ok(response.base_fee)
+            }
+            Err(e) => {
+                if let Some(mut entry) = self.fee_rate_cache.get_mut(token_id) {
+                    let (rate, fetched_at) = entry.value_mut();
+                    log::warn!("Fee rate refresh failed, using stale cached value: {e}");
+                    let rate = *rate;
+                    *fetched_at = Instant::now();
+                    Ok(rate)
+                } else {
+                    Err(anyhow::anyhow!("Failed to fetch fee rate: {e}"))
+                }
+            }
         }
     }
 
@@ -97,6 +143,8 @@ impl OrderSubmitter {
             _ => "0".to_string(),
         };
 
+        let fee_rate_bps = self.get_fee_rate_bps(token_id).await?;
+
         let poly_order = self
             .order_builder
             .build_limit_order(
@@ -107,10 +155,12 @@ impl OrderSubmitter {
                 &expiration,
                 neg_risk,
                 tick_decimals,
+                fee_rate_bps,
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let http_client = self.http_client.clone();
+
         self.retry_manager
             .execute_with_retry(
                 "submit_limit_order",
@@ -135,6 +185,7 @@ impl OrderSubmitter {
     /// Converts Nautilus side to Polymarket side, walks the appropriate book side
     /// to find the crossing price, then builds and submits a FOK order.
     /// The book fetch is not retried (stale on retry); only the final POST is retried.
+    /// Returns `(OrderResponse, expected_base_qty)` on success.
     pub async fn submit_market_order(
         &self,
         token_id: &str,
@@ -142,7 +193,7 @@ impl OrderSubmitter {
         amount: Quantity,
         neg_risk: bool,
         tick_decimals: u32,
-    ) -> anyhow::Result<OrderResponse> {
+    ) -> anyhow::Result<(OrderResponse, Decimal)> {
         let poly_side = PolymarketOrderSide::try_from(side)
             .map_err(|e| anyhow::anyhow!("Invalid order side: {e}"))?;
         let amount_dec = amount.as_decimal();
@@ -158,23 +209,28 @@ impl OrderSubmitter {
             PolymarketOrderSide::Sell => &book.bids,
         };
 
-        let price = calculate_market_price(levels, amount_dec, poly_side)
+        let result = calculate_market_price(levels, amount_dec, poly_side)
             .map_err(|e| anyhow::anyhow!("Market price calculation failed: {e}"))?;
+
+        let fee_rate_bps = self.get_fee_rate_bps(token_id).await?;
 
         let poly_order = self
             .order_builder
             .build_market_order(
                 token_id,
                 poly_side,
-                price,
+                result.crossing_price,
                 amount_dec,
                 neg_risk,
                 tick_decimals,
+                fee_rate_bps,
             )
             .map_err(|e| anyhow::anyhow!("Failed to build market order: {e}"))?;
 
         let http_client = self.http_client.clone();
-        self.retry_manager
+
+        let response = self
+            .retry_manager
             .execute_with_retry(
                 "submit_market_order",
                 || {
@@ -190,7 +246,9 @@ impl OrderSubmitter {
                 Error::transport,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        Ok((response, result.expected_base_qty))
     }
 
     /// Cancels a single order with retry on transient failures.
@@ -216,6 +274,7 @@ impl OrderSubmitter {
     pub async fn cancel_orders(&self, venue_order_ids: &[&str]) -> anyhow::Result<CancelResponse> {
         let http_client = self.http_client.clone();
         let order_ids: Vec<String> = venue_order_ids.iter().map(|s| s.to_string()).collect();
+
         self.retry_manager
             .execute_with_retry(
                 "cancel_orders",
@@ -232,5 +291,25 @@ impl OrderSubmitter {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Fetches a single order by its venue order ID from the CLOB REST API.
+    pub async fn get_order(&self, order_id: &str) -> anyhow::Result<PolymarketOpenOrder> {
+        let http_client = self.http_client.clone();
+        let oid = order_id.to_string();
+
+        self.retry_manager
+            .execute_with_retry(
+                "get_order",
+                || {
+                    let http_client = http_client.clone();
+                    let oid = oid.clone();
+                    async move { http_client.get_order(&oid).await }
+                },
+                |e| e.is_retryable(),
+                Error::transport,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch order status: {e}"))
     }
 }

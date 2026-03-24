@@ -1024,7 +1024,7 @@ impl ExecutionClient for BinanceSpotExecutionClient {
                 cmd.client_order_id,
                 "Order not found in cache for modify".into(),
                 UUID4::new(),
-                ts_init, // TODO: Use proper event timestamp
+                ts_init, // no venue timestamp, rejected locally
                 ts_init,
                 false,
                 cmd.venue_order_id,
@@ -1124,8 +1124,9 @@ impl ExecutionClient for BinanceSpotExecutionClient {
                             Some(report.venue_order_id),
                             Some(account_id),
                             report.price,
-                            None, // trigger_price
-                            None, // protection_price
+                            None,  // trigger_price
+                            None,  // protection_price
+                            false, // is_quote_quantity
                         );
                         event_emitter.send_order_event(OrderEventAny::Updated(updated_event));
                     }
@@ -1796,7 +1797,8 @@ fn dispatch_tracked_execution_report(
                     Some(account_id),
                     Some(Price::new(price, price_precision)),
                     trigger,
-                    None, // protection_price
+                    None,  // protection_price
+                    false, // is_quote_quantity
                 );
                 emitter.send_order_event(OrderEventAny::Updated(updated));
                 return;

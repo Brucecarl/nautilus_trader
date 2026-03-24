@@ -249,36 +249,21 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        description: Run the Clippy linter on the workspace
-        entry: cargo clippy
+        description: Run the Clippy linter on changed crates
+        entry: bash scripts/clippy-changed.sh
         language: system
-        args:
-          [
-            "--workspace",
-            "--all-targets",
-            "--features",
-            "ffi,python,high-precision,defi",
-            "--profile",
-            "nextest", # Reduce rebuild triggers between testing and linting
-            "--",
-            "-D",
-            "warnings",
-          ]
         files: '\.(rs|toml)$'
         types: [file]
         pass_filenames: false
 
-      # TODO: Too slow for standard development flows
-      # - id: cargo-doc
-      #   name: cargo doc
-      #   description: Check documentation builds without errors or warnings
-      #   entry:
-      #     cargo doc --workspace --features "ffi,python,high-precision,defi"
-      #     --profile nextest --no-deps --quiet
-      #   language: system
-      #   files: '\.(rs|toml)$'
-      #   types: [file]
-      #   pass_filenames: false
+      - id: cargo-doc
+        name: cargo doc
+        description: Check documentation builds on changed crates
+        entry: bash scripts/doc-changed.sh
+        language: system
+        files: '\.(rs|toml)$'
+        types: [file]
+        pass_filenames: false
 
   ##############################################################################
   #  Python/Cython formatting and linting
@@ -353,7 +338,7 @@ repos:
     rev: 0.10.12 # Must match uv-version file
     hooks:
       - id: uv-lock
-        files: ^python/uv\.lock$
+        files: ^(uv\.lock|python/uv\.lock)$
 
   - repo: https://github.com/kynan/nbstripout
     rev: 0.9.1
@@ -364,7 +349,7 @@ repos:
   #  Markdown formatting and linting
   ##############################################################################
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.21.0
+    rev: v0.22.0
     hooks:
       - id: markdownlint-cli2
         name: markdownlint

@@ -139,7 +139,7 @@ jobs:
         uses: ./.github/actions/common-test-data
 
       - name: Run Rust tests
-        run: make cargo-test HYPERSYNC=true
+        run: make cargo-test HYPERSYNC=true NEXTEST_PROFILE=ci
 
   build:
     needs:

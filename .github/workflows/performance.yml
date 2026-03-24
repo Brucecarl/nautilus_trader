@@ -113,7 +113,7 @@ jobs:
           POSTGRES_DATABASE: nautilus
 
       - name: Run Rust tests
-        run: make cargo-test
+        run: make cargo-test NEXTEST_PROFILE=ci
 
       # TODO: Add nautilus-persistence once required test data available
       - name: Run Rust benchmarks crate-by-crate
