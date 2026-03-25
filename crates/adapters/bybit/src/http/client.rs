@@ -30,9 +30,8 @@ use std::{
 
 use ahash::{AHashMap, AHashSet};
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use nautilus_core::{
-    AtomicTime, consts::NAUTILUS_USER_AGENT, env::get_or_env_var_opt, nanos::UnixNanos,
+    AtomicMap, AtomicTime, consts::NAUTILUS_USER_AGENT, env::get_or_env_var_opt, nanos::UnixNanos,
     time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
@@ -1233,7 +1232,7 @@ impl BybitRawHttpClient {
 /// into Nautilus domain objects.
 pub struct BybitHttpClient {
     pub(crate) inner: Arc<BybitRawHttpClient>,
-    pub(crate) instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
+    pub(crate) instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
     clock: &'static AtomicTime,
     cache_initialized: Arc<AtomicBool>,
     use_spot_position_reports: Arc<AtomicBool>,
@@ -1292,7 +1291,7 @@ impl BybitHttpClient {
                 recv_window_ms,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: Arc::new(AtomicBool::new(false)),
             use_spot_position_reports: Arc::new(AtomicBool::new(false)),
             clock: get_atomic_clock_realtime(),
@@ -1328,7 +1327,7 @@ impl BybitHttpClient {
                 recv_window_ms,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: Arc::new(AtomicBool::new(false)),
             use_spot_position_reports: Arc::new(AtomicBool::new(false)),
             clock: get_atomic_clock_realtime(),
@@ -1436,18 +1435,17 @@ impl BybitHttpClient {
     }
 
     /// Any existing instruments with the same symbols will be replaced.
-    pub fn cache_instruments(&self, instruments: Vec<InstrumentAny>) {
-        for instrument in instruments {
-            self.instruments_cache
-                .insert(instrument.symbol().inner(), instrument);
-        }
+    pub fn cache_instruments(&self, instruments: &[InstrumentAny]) {
+        self.instruments_cache.rcu(|m| {
+            for instrument in instruments {
+                m.insert(instrument.symbol().inner(), instrument.clone());
+            }
+        });
         self.cache_initialized.store(true, Ordering::Release);
     }
 
     pub fn get_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
-        self.instruments_cache
-            .get(symbol)
-            .map(|entry| entry.value().clone())
+        self.instruments_cache.get_cloned(symbol)
     }
 
     fn instrument_from_cache(&self, symbol: &Symbol) -> anyhow::Result<InstrumentAny> {
@@ -1941,7 +1939,10 @@ impl BybitHttpClient {
         let mut reports = Vec::new();
 
         if let Some(instrument_id) = instrument_id {
-            if let Some(instrument) = self.instruments_cache.get(&instrument_id.symbol.inner()) {
+            if let Some(instrument) = self
+                .instruments_cache
+                .get_cloned(&instrument_id.symbol.inner())
+            {
                 let base_currency = instrument
                     .base_currency()
                     .expect("SPOT instrument should have base currency");
@@ -1975,9 +1976,8 @@ impl BybitHttpClient {
             }
         } else {
             // Generate reports for all SPOT instruments with non-zero balance
-            for entry in self.instruments_cache.iter() {
-                let symbol = entry.key();
-                let instrument = entry.value();
+            let instruments_guard = self.instruments_cache.load();
+            for (symbol, instrument) in instruments_guard.iter() {
                 // Only consider SPOT instruments
                 if !symbol.as_str().ends_with("-SPOT") {
                     continue;
@@ -2726,6 +2726,39 @@ impl BybitHttpClient {
         }
     }
 
+    async fn fetch_option_fee_map(&self) -> anyhow::Result<AHashMap<Ustr, BybitFeeRate>> {
+        let mut fee_params = BybitFeeRateParamsBuilder::default();
+        fee_params.category(BybitProductType::Option);
+        let Ok(params) = fee_params.build() else {
+            return Ok(AHashMap::new());
+        };
+        match self.inner.get_fee_rate(&params).await {
+            Ok(response) => Ok(response
+                .result
+                .list
+                .into_iter()
+                .filter_map(|f| f.base_coin.map(|bc| (bc, f)))
+                .collect()),
+            Err(BybitHttpError::MissingCredentials) => {
+                log::warn!("Missing credentials for option fee rates, using defaults");
+                Ok(AHashMap::new())
+            }
+            Err(BybitHttpError::BybitError {
+                error_code,
+                ref message,
+            }) => {
+                log::warn!(
+                    "Option fee rate request rejected (error {error_code}: {message}), using defaults"
+                );
+                Ok(AHashMap::new())
+            }
+            Err(e) => {
+                log::warn!("Option fee rate request failed ({e}), using defaults");
+                Ok(AHashMap::new())
+            }
+        }
+    }
+
     async fn paginate_instruments<D, F>(
         &self,
         product_type: BybitProductType,
@@ -2906,18 +2939,20 @@ impl BybitHttpClient {
                 .await?
             }
             BybitProductType::Option => {
+                let fee_map = self.fetch_option_fee_map().await?;
                 self.paginate_instruments::<BybitInstrumentOption, _>(
                     product_type,
                     &symbol,
-                    |def| parse_option_instrument(def, ts_init, ts_init).ok(),
+                    |def| {
+                        let fee = fee_map.get(&def.base_coin);
+                        parse_option_instrument(def, fee, ts_init, ts_init).ok()
+                    },
                 )
                 .await?
             }
         };
 
-        for instrument in &instruments {
-            self.cache_instrument(instrument.clone());
-        }
+        self.cache_instruments(&instruments);
 
         Ok(instruments)
     }

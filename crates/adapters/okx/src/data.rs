@@ -149,9 +149,9 @@ impl OKXDataClient {
             Some(
                 OKXWebSocketClient::new(
                     Some(config.ws_business_url()),
-                    config.api_key.clone(),
-                    config.api_secret.clone(),
-                    config.api_passphrase.clone(),
+                    None, // No auth needed for public business channels
+                    None,
+                    None,
                     None,
                     Some(20), // Heartbeat
                     None,
@@ -277,6 +277,7 @@ impl OKXDataClient {
                     match serde_json::from_value::<Vec<OKXOptionSummaryMsg>>(data) {
                         Ok(msgs) => {
                             let subs = option_greeks_subs.read().expect(MUTEX_POISONED);
+
                             for msg in &msgs {
                                 let Some(instrument) = instruments_by_symbol.get(&msg.inst_id)
                                 else {
@@ -382,6 +383,7 @@ impl OKXDataClient {
             }
             OKXWsMessage::Instruments(okx_instruments) => {
                 let ts_init = clock.get_time_ns();
+
                 for okx_inst in okx_instruments {
                     let inst_key = Ustr::from(&okx_inst.inst_id);
                     let (margin_init, margin_maint, maker_fee, taker_fee) =
@@ -628,6 +630,7 @@ impl DataClient for OKXDataClient {
         };
 
         let mut all_instruments = Vec::new();
+
         for inst_type in &instrument_types {
             let families: Vec<String> = match (&self.config.instrument_families, inst_type) {
                 (Some(families), OKXInstrumentType::Option) => families.clone(),
@@ -653,9 +656,10 @@ impl DataClient for OKXDataClient {
                     })?;
 
                 fetched.retain(|instrument| contract_filter_with_config(&self.config, instrument));
-                self.http_client.cache_instruments(fetched.clone());
+                self.http_client.cache_instruments(&fetched);
 
                 let mut guard = self.instruments.write().expect(MUTEX_POISONED);
+
                 for instrument in &fetched {
                     guard.insert(instrument.id(), instrument.clone());
                 }
@@ -676,9 +680,10 @@ impl DataClient for OKXDataClient {
 
                     fetched
                         .retain(|instrument| contract_filter_with_config(&self.config, instrument));
-                    self.http_client.cache_instruments(fetched.clone());
+                    self.http_client.cache_instruments(&fetched);
 
                     let mut guard = self.instruments.write().expect(MUTEX_POISONED);
+
                     for instrument in &fetched {
                         guard.insert(instrument.id(), instrument.clone());
                     }
@@ -857,6 +862,7 @@ impl DataClient for OKXDataClient {
         }
 
         let handles: Vec<_> = self.tasks.drain(..).collect();
+
         for handle in handles {
             if let Err(e) = handle.await {
                 log::error!("Error joining websocket task: {e}");

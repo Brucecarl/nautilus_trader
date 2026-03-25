@@ -47,10 +47,10 @@ use std::{
 use ahash::{AHashMap, AHashSet};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use nautilus_core::{
-    AtomicTime, UnixNanos, consts::NAUTILUS_USER_AGENT, datetime::NANOSECONDS_IN_MILLISECOND,
-    env::get_or_env_var, string::REDACTED, time::get_atomic_clock_realtime,
+    AtomicMap, AtomicTime, UnixNanos, consts::NAUTILUS_USER_AGENT,
+    datetime::NANOSECONDS_IN_MILLISECOND, env::get_or_env_var, string::REDACTED,
+    time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
     data::{
@@ -201,10 +201,10 @@ pub static OKX_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
 
 const OKX_GLOBAL_RATE_KEY: &str = "okx:global";
 
-/// OKX returns at most 100 records per page for order, fill, and algo endpoints.
+// OKX returns at most 100 records per page for order, fill, and algo endpoints
 const OKX_PAGE_SIZE: usize = 100;
 
-/// Safety cap on paginated reconciliation fetches to avoid unbounded loops.
+// Safety cap on paginated reconciliation fetches to avoid unbounded loops
 const MAX_RECONCILIATION_PAGES: usize = 50;
 
 /// Represents an OKX HTTP response.
@@ -1121,7 +1121,7 @@ impl OKXRawHttpClient {
 )]
 pub struct OKXHttpClient {
     pub(crate) inner: Arc<OKXRawHttpClient>,
-    pub(crate) instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
+    pub(crate) instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
     clock: &'static AtomicTime,
     cache_initialized: AtomicBool,
 }
@@ -1180,7 +1180,7 @@ impl OKXHttpClient {
                 is_demo,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: AtomicBool::new(false),
             clock: get_atomic_clock_realtime(),
         })
@@ -1238,7 +1238,7 @@ impl OKXHttpClient {
                 is_demo,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: AtomicBool::new(false),
             clock: get_atomic_clock_realtime(),
         })
@@ -1251,8 +1251,7 @@ impl OKXHttpClient {
     /// Returns an error if the instrument is not found in the cache.
     fn instrument_from_cache(&self, symbol: Ustr) -> anyhow::Result<InstrumentAny> {
         self.instruments_cache
-            .get(&symbol)
-            .map(|entry| entry.value().clone())
+            .get_cloned(&symbol)
             .ok_or_else(|| anyhow::anyhow!("Instrument {symbol} not in cache"))
     }
 
@@ -1312,19 +1311,21 @@ impl OKXHttpClient {
     #[must_use]
     pub fn get_cached_symbols(&self) -> Vec<String> {
         self.instruments_cache
-            .iter()
-            .map(|entry| entry.key().to_string())
+            .load()
+            .keys()
+            .map(|k| k.to_string())
             .collect()
     }
 
     /// Caches multiple instruments.
     ///
     /// Any existing instruments with the same symbols will be replaced.
-    pub fn cache_instruments(&self, instruments: Vec<InstrumentAny>) {
-        for inst in instruments {
-            self.instruments_cache
-                .insert(inst.raw_symbol().inner(), inst);
-        }
+    pub fn cache_instruments(&self, instruments: &[InstrumentAny]) {
+        self.instruments_cache.rcu(|m| {
+            for inst in instruments {
+                m.insert(inst.raw_symbol().inner(), inst.clone());
+            }
+        });
         self.cache_initialized.store(true, Ordering::Release);
     }
 
@@ -1339,9 +1340,7 @@ impl OKXHttpClient {
 
     /// Gets an instrument from the cache by symbol.
     pub fn get_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
-        self.instruments_cache
-            .get(symbol)
-            .map(|entry| entry.value().clone())
+        self.instruments_cache.get_cloned(symbol)
     }
 
     /// Requests the account state for the `account_id` from OKX.
@@ -1716,6 +1715,7 @@ impl OKXHttpClient {
         }
 
         let bids_len = snapshot.bids.len();
+
         for (i, level) in snapshot.asks.iter().enumerate() {
             let price = parse_price(&level.0, price_precision)?;
             let size = parse_quantity(&level.1, size_precision)?;
@@ -1774,6 +1774,7 @@ impl OKXHttpClient {
         deltas.push(clear);
 
         let mut processed = 0_usize;
+
         for (i, level) in snapshot.bids.iter().enumerate() {
             let price = parse_price(&level.0, price_precision)?;
             let size = parse_quantity(&level.1, size_precision)?;
@@ -1796,6 +1797,7 @@ impl OKXHttpClient {
         }
 
         let bids_len = snapshot.bids.len();
+
         for (i, level) in snapshot.asks.iter().enumerate() {
             let price = parse_price(&level.0, price_precision)?;
             let size = parse_quantity(&level.1, size_precision)?;
@@ -2146,6 +2148,7 @@ impl OKXHttpClient {
             );
 
             let mut out: Vec<TradeTick> = Vec::new();
+
             for page in page_results.into_iter().rev() {
                 out.extend(page);
             }
@@ -2193,6 +2196,7 @@ impl OKXHttpClient {
             .map_err(anyhow::Error::new)?;
 
         let mut trades: Vec<TradeTick> = Vec::with_capacity(raw.len());
+
         for r in &raw {
             match parse_trade_tick(
                 r,
@@ -2571,6 +2575,7 @@ impl OKXHttpClient {
             // Parse, oldest → newest
             let ts_init = self.generate_ts_init();
             let mut page: Vec<Bar> = Vec::with_capacity(raw.len());
+
             for r in &raw {
                 page.push(parse_candlestick(
                     r,
@@ -2806,6 +2811,7 @@ impl OKXHttpClient {
             if !raw.is_empty() {
                 let ts_init = self.generate_ts_init();
                 let mut page: Vec<Bar> = Vec::with_capacity(raw.len());
+
                 for r in &raw {
                     page.push(parse_candlestick(
                         r,
@@ -2999,6 +3005,7 @@ impl OKXHttpClient {
     ) -> anyhow::Result<Vec<OKXOrderHistory>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut exhausted = true;
 
         for _ in 0..MAX_RECONCILIATION_PAGES {
             let mut params = base.clone();
@@ -3015,14 +3022,24 @@ impl OKXHttpClient {
             all.extend(page);
 
             if page_len < OKX_PAGE_SIZE {
+                exhausted = false;
                 break;
             }
 
             if let Some(lim) = limit
                 && all.len() >= lim as usize
             {
+                exhausted = false;
                 break;
             }
+        }
+
+        if exhausted && !all.is_empty() {
+            log::warn!(
+                "Order history pagination hit {MAX_RECONCILIATION_PAGES} page cap, \
+                 results may be truncated ({} records)",
+                all.len()
+            );
         }
 
         if let Some(lim) = limit {
@@ -3040,6 +3057,7 @@ impl OKXHttpClient {
     ) -> anyhow::Result<Vec<OKXOrderHistory>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut exhausted = true;
 
         for _ in 0..MAX_RECONCILIATION_PAGES {
             let mut params = base.clone();
@@ -3056,14 +3074,24 @@ impl OKXHttpClient {
             all.extend(page);
 
             if page_len < OKX_PAGE_SIZE {
+                exhausted = false;
                 break;
             }
 
             if let Some(lim) = limit
                 && all.len() >= lim as usize
             {
+                exhausted = false;
                 break;
             }
+        }
+
+        if exhausted && !all.is_empty() {
+            log::warn!(
+                "Pending orders pagination hit {MAX_RECONCILIATION_PAGES} page cap, \
+                 results may be truncated ({} records)",
+                all.len()
+            );
         }
 
         if let Some(lim) = limit {
@@ -3081,6 +3109,7 @@ impl OKXHttpClient {
     ) -> anyhow::Result<Vec<OKXTransactionDetail>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut exhausted = true;
 
         for _ in 0..MAX_RECONCILIATION_PAGES {
             let mut params = base.clone();
@@ -3097,14 +3126,24 @@ impl OKXHttpClient {
             all.extend(page);
 
             if page_len < OKX_PAGE_SIZE {
+                exhausted = false;
                 break;
             }
 
             if let Some(lim) = limit
                 && all.len() >= lim as usize
             {
+                exhausted = false;
                 break;
             }
+        }
+
+        if exhausted && !all.is_empty() {
+            log::warn!(
+                "Fill pagination hit {MAX_RECONCILIATION_PAGES} page cap, \
+                 results may be truncated ({} records)",
+                all.len()
+            );
         }
 
         if let Some(lim) = limit {
@@ -3122,6 +3161,7 @@ impl OKXHttpClient {
     ) -> anyhow::Result<Vec<OKXOrderAlgo>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut exhausted = true;
 
         for _ in 0..MAX_RECONCILIATION_PAGES {
             let mut params = base.clone();
@@ -3132,6 +3172,7 @@ impl OKXHttpClient {
                 Err(OKXHttpError::UnexpectedStatus { status, .. })
                     if status == StatusCode::NOT_FOUND =>
                 {
+                    exhausted = false;
                     break;
                 }
                 Err(e) => return Err(e.into()),
@@ -3142,14 +3183,24 @@ impl OKXHttpClient {
             all.extend(page);
 
             if page_len < OKX_PAGE_SIZE {
+                exhausted = false;
                 break;
             }
 
             if let Some(lim) = limit
                 && all.len() >= lim
             {
+                exhausted = false;
                 break;
             }
+        }
+
+        if exhausted && !all.is_empty() {
+            log::warn!(
+                "Algo pending pagination hit {MAX_RECONCILIATION_PAGES} page cap, \
+                 results may be truncated ({} records)",
+                all.len()
+            );
         }
 
         Ok(all)
@@ -3163,6 +3214,7 @@ impl OKXHttpClient {
     ) -> anyhow::Result<Vec<OKXOrderAlgo>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut exhausted = true;
 
         for _ in 0..MAX_RECONCILIATION_PAGES {
             let mut params = base.clone();
@@ -3173,6 +3225,7 @@ impl OKXHttpClient {
                 Err(OKXHttpError::UnexpectedStatus { status, .. })
                     if status == StatusCode::NOT_FOUND =>
                 {
+                    exhausted = false;
                     break;
                 }
                 Err(e) => return Err(e.into()),
@@ -3183,14 +3236,24 @@ impl OKXHttpClient {
             all.extend(page);
 
             if page_len < OKX_PAGE_SIZE {
+                exhausted = false;
                 break;
             }
 
             if let Some(lim) = limit
                 && all.len() >= lim
             {
+                exhausted = false;
                 break;
             }
+        }
+
+        if exhausted && !all.is_empty() {
+            log::warn!(
+                "Algo history pagination hit {MAX_RECONCILIATION_PAGES} page cap, \
+                 results may be truncated ({} records)",
+                all.len()
+            );
         }
 
         Ok(all)

@@ -27,9 +27,9 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use nautilus_common::live::get_runtime;
-use nautilus_core::{UUID4, consts::NAUTILUS_USER_AGENT};
+use nautilus_core::{AtomicMap, AtomicSet, UUID4, consts::NAUTILUS_USER_AGENT};
 use nautilus_model::{
     data::BarType,
     enums::{AggregationSource, OrderSide, OrderType, PriceType, TimeInForce},
@@ -58,8 +58,8 @@ use crate::{
             BybitTriggerType, BybitWsOrderRequestOp,
         },
         parse::{
-            bar_spec_to_bybit_interval, extract_raw_symbol, map_time_in_force, spot_leverage,
-            spot_market_unit, trigger_direction,
+            bar_spec_to_bybit_interval, extract_base_coin, extract_raw_symbol, map_time_in_force,
+            spot_leverage, spot_market_unit, trigger_direction,
         },
         symbol::BybitSymbol,
         urls::{bybit_ws_private_url, bybit_ws_public_url, bybit_ws_trade_url},
@@ -115,9 +115,10 @@ pub struct BybitWebSocketClient {
     subscriptions: SubscriptionState,
     account_id: Option<AccountId>,
     mm_level: Arc<AtomicU8>,
-    bar_types_cache: Arc<DashMap<String, BarType>>,
-    instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
-    option_greeks_subs: Arc<DashSet<InstrumentId>>,
+    bar_types_cache: Arc<AtomicMap<String, BarType>>,
+    instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
+    trade_subs: Arc<AtomicSet<InstrumentId>>,
+    option_greeks_subs: Arc<AtomicSet<InstrumentId>>,
     bars_timestamp_on_close: Arc<AtomicBool>,
     pending_py_requests: Arc<DashMap<String, Vec<PendingPyRequest>>>,
     cancellation_token: CancellationToken,
@@ -156,6 +157,7 @@ impl Clone for BybitWebSocketClient {
             mm_level: Arc::clone(&self.mm_level),
             bar_types_cache: Arc::clone(&self.bar_types_cache),
             instruments_cache: Arc::clone(&self.instruments_cache),
+            trade_subs: Arc::clone(&self.trade_subs),
             option_greeks_subs: Arc::clone(&self.option_greeks_subs),
             bars_timestamp_on_close: Arc::clone(&self.bars_timestamp_on_close),
             pending_py_requests: Arc::clone(&self.pending_py_requests),
@@ -203,9 +205,10 @@ impl BybitWebSocketClient {
             signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             subscriptions: SubscriptionState::new(BYBIT_WS_TOPIC_DELIMITER),
-            bar_types_cache: Arc::new(DashMap::new()),
-            instruments_cache: Arc::new(DashMap::new()),
-            option_greeks_subs: Arc::new(DashSet::new()),
+            bar_types_cache: Arc::new(AtomicMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
+            trade_subs: Arc::new(AtomicSet::new()),
+            option_greeks_subs: Arc::new(AtomicSet::new()),
             bars_timestamp_on_close: Arc::new(AtomicBool::new(true)),
             pending_py_requests: Arc::new(DashMap::new()),
             account_id: None,
@@ -250,9 +253,10 @@ impl BybitWebSocketClient {
             signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             subscriptions: SubscriptionState::new(BYBIT_WS_TOPIC_DELIMITER),
-            bar_types_cache: Arc::new(DashMap::new()),
-            instruments_cache: Arc::new(DashMap::new()),
-            option_greeks_subs: Arc::new(DashSet::new()),
+            bar_types_cache: Arc::new(AtomicMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
+            trade_subs: Arc::new(AtomicSet::new()),
+            option_greeks_subs: Arc::new(AtomicSet::new()),
             bars_timestamp_on_close: Arc::new(AtomicBool::new(true)),
             pending_py_requests: Arc::new(DashMap::new()),
             account_id: None,
@@ -297,9 +301,10 @@ impl BybitWebSocketClient {
             signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             subscriptions: SubscriptionState::new(BYBIT_WS_TOPIC_DELIMITER),
-            bar_types_cache: Arc::new(DashMap::new()),
-            instruments_cache: Arc::new(DashMap::new()),
-            option_greeks_subs: Arc::new(DashSet::new()),
+            bar_types_cache: Arc::new(AtomicMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
+            trade_subs: Arc::new(AtomicSet::new()),
+            option_greeks_subs: Arc::new(AtomicSet::new()),
             bars_timestamp_on_close: Arc::new(AtomicBool::new(true)),
             pending_py_requests: Arc::new(DashMap::new()),
             account_id: None,
@@ -852,7 +857,7 @@ impl BybitWebSocketClient {
 
     /// Returns a reference to the bar types cache.
     #[must_use]
-    pub fn bar_types_cache(&self) -> &Arc<DashMap<String, BarType>> {
+    pub fn bar_types_cache(&self) -> &Arc<AtomicMap<String, BarType>> {
         &self.bar_types_cache
     }
 
@@ -865,10 +870,7 @@ impl BybitWebSocketClient {
     /// Returns a snapshot of the instruments cache keyed by symbol.
     #[must_use]
     pub fn instruments_snapshot(&self) -> ahash::AHashMap<Ustr, InstrumentAny> {
-        self.instruments_cache
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect()
+        (**self.instruments_cache.load()).clone()
     }
 
     /// Sets whether bar timestamps use the close time.
@@ -894,8 +896,14 @@ impl BybitWebSocketClient {
 
     /// Returns a reference to the option greeks subscription set.
     #[must_use]
-    pub fn option_greeks_subs(&self) -> &Arc<DashSet<InstrumentId>> {
+    pub fn option_greeks_subs(&self) -> &Arc<AtomicSet<InstrumentId>> {
         &self.option_greeks_subs
+    }
+
+    /// Returns a reference to the trade subscriptions set.
+    #[must_use]
+    pub fn trade_subs(&self) -> &Arc<AtomicSet<InstrumentId>> {
+        &self.trade_subs
     }
 
     /// Returns a reference to the pending Python requests map.
@@ -906,7 +914,7 @@ impl BybitWebSocketClient {
 
     /// Returns a reference to the live instruments cache Arc.
     #[must_use]
-    pub fn instruments_cache_ref(&self) -> &Arc<DashMap<Ustr, InstrumentAny>> {
+    pub fn instruments_cache_ref(&self) -> &Arc<AtomicMap<Ustr, InstrumentAny>> {
         &self.instruments_cache
     }
 
@@ -956,9 +964,15 @@ impl BybitWebSocketClient {
     ///
     /// <https://bybit-exchange.github.io/docs/v5/websocket/public/trade>
     pub async fn subscribe_trades(&self, instrument_id: InstrumentId) -> BybitWsResult<()> {
+        self.trade_subs.insert(instrument_id);
         let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str());
+        // Bybit option trades use baseCoin topic (e.g. publicTrade.BTC)
+        let topic_symbol = match self.product_type {
+            Some(BybitProductType::Option) => extract_base_coin(raw_symbol),
+            _ => raw_symbol,
+        };
         let topic = format!(
-            "{}.{raw_symbol}",
+            "{}.{topic_symbol}",
             BybitWsPublicChannel::PublicTrade.as_ref()
         );
         self.subscribe(vec![topic]).await
@@ -966,9 +980,14 @@ impl BybitWebSocketClient {
 
     /// Unsubscribes from public trade updates for a specific instrument.
     pub async fn unsubscribe_trades(&self, instrument_id: InstrumentId) -> BybitWsResult<()> {
+        self.trade_subs.remove(&instrument_id);
         let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str());
+        let topic_symbol = match self.product_type {
+            Some(BybitProductType::Option) => extract_base_coin(raw_symbol),
+            _ => raw_symbol,
+        };
         let topic = format!(
-            "{}.{raw_symbol}",
+            "{}.{topic_symbol}",
             BybitWsPublicChannel::PublicTrade.as_ref()
         );
         self.unsubscribe(vec![topic]).await
@@ -1006,6 +1025,12 @@ impl BybitWebSocketClient {
     ///
     /// <https://bybit-exchange.github.io/docs/v5/websocket/public/kline>
     pub async fn subscribe_bars(&self, bar_type: BarType) -> BybitWsResult<()> {
+        if self.product_type == Some(BybitProductType::Option) {
+            return Err(BybitWsError::ClientError(
+                "Bybit does not support kline/bar data for options".to_string(),
+            ));
+        }
+
         let spec = bar_type.spec();
 
         if spec.price_type != PriceType::Last {
