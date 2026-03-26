@@ -44,7 +44,7 @@ use tokio::{time::Instant, try_join};
 use ustr::Ustr;
 
 use crate::sql::{
-    pg::{connect_pg, get_postgres_connect_options},
+    pg::{PostgresConnectOptions, connect_pg, get_postgres_connect_options},
     queries::DatabaseQueries,
 };
 
@@ -100,6 +100,19 @@ impl PostgresCacheDatabase {
     ) -> Result<Self, sqlx::Error> {
         let pg_connect_options =
             get_postgres_connect_options(host, port, username, password, database);
+        let pool = connect_pg(pg_connect_options.clone().into()).await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DatabaseQuery>();
+
+        // Spawn a task to handle messages
+        let handle = tokio::spawn(async move {
+            Self::process_commands(rx, pg_connect_options.clone().into()).await;
+        });
+        Ok(Self { pool, tx, handle })
+    }
+    pub async fn connect_url(
+        database_url: &str
+    ) -> anyhow::Result<Self> {
+        let pg_connect_options =PostgresConnectOptions::try_from(database_url)?;
         let pool = connect_pg(pg_connect_options.clone().into()).await.unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DatabaseQuery>();
 
