@@ -24,6 +24,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 use ustr::Ustr;
 
 use super::models::GammaMarket;
@@ -75,6 +76,9 @@ pub struct PolymarketInstrumentDef {
     pub market_slug: Option<String>,
     /// Whether the market uses the neg-risk CTF exchange contract.
     pub neg_risk: bool,
+    pub outcome_index:usize,
+    pub complement_token_id:Option<Ustr>,
+    pub outcome_prices: Option<String>,
 }
 
 /// Parses a Gamma market response into instrument definitions.
@@ -127,7 +131,7 @@ pub fn parse_gamma_market(market: &GammaMarket) -> anyhow::Result<Vec<Polymarket
 
     let mut defs = Vec::with_capacity(2);
 
-    for (token_id, outcome_label) in token_ids.iter().zip(outcomes.iter()) {
+    for (i,(token_id, outcome_label)) in token_ids.iter().zip(outcomes.iter()).enumerate() {
         let outcome = PolymarketOutcome::from(outcome_label.as_str());
 
         let symbol_str = format!("{}-{token_id}", market.condition_id);
@@ -151,6 +155,9 @@ pub fn parse_gamma_market(market: &GammaMarket) -> anyhow::Result<Vec<Polymarket
             active,
             market_slug: market.market_slug.clone(),
             neg_risk,
+            outcome_index:i,
+            complement_token_id:Some(Ustr::from(token_ids[1-i].as_str())),
+            outcome_prices:market.outcome_prices.clone(),
         });
     }
 
@@ -267,6 +274,26 @@ fn build_info_json(def: &PolymarketInstrumentDef) -> serde_json::Value {
         "neg_risk".to_string(),
         serde_json::Value::Bool(def.neg_risk),
     );
+    map.insert(
+        "active".to_string(),
+        serde_json::Value::Bool(def.active),
+    );
+    map.insert(
+        "outcome_index".to_string(),
+    serde_json::Value::Number(Number::from_u128(def.outcome_index as u128).unwrap())
+    );
+    if let Some(cid)=&def.complement_token_id{
+        map.insert(
+            "complement_token_id".to_string(),
+            serde_json::Value::String(cid.to_string()),
+        );
+    }
+    if let Some(outcome_prices)=&def.outcome_prices{
+        map.insert(
+            "outcome_prices".to_string(),
+            serde_json::Value::String(outcome_prices.clone()),
+        );
+    }
 
     serde_json::Value::Object(map)
 }
