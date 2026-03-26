@@ -13,9 +13,10 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use anyhow::{Context};
 use derive_builder::Builder;
 use regex::Regex;
-use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+use sqlx::{ConnectOptions, PgPool, postgres::{PgConnectOptions, PgPoolOptions}};
 
 fn validate_sql_identifier(value: &str, label: &str) -> anyhow::Result<()> {
     if value.is_empty() {
@@ -131,6 +132,28 @@ impl From<PostgresConnectOptions> for PgConnectOptions {
             .password(opt.password.as_str())
             .database(opt.database.as_str())
             .disable_statement_logging()
+    }
+}
+impl TryFrom<&str> for PostgresConnectOptions {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let re = Regex::new(
+            r"^postgres://(?P<username>[^:]+):(?P<password>[^@]+)@(?P<host>[^:]+):(?P<port>\d+)/(?P<database>.+)$",
+        )?;
+        let caps = re
+            .captures(value)
+            .context("invalid postgres URL, expected: postgres://{username}:{password}@{host}:{port}/{database}")?;
+        let port = caps["port"]
+            .parse::<u16>()
+            .context("invalid port in postgres URL")?;
+        Ok(Self::new(
+            caps["host"].to_string(),
+            port,
+            caps["username"].to_string(),
+            caps["password"].to_string(),
+            caps["database"].to_string(),
+        ))
     }
 }
 
