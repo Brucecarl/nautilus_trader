@@ -797,6 +797,13 @@ impl DataClient for PolymarketDataClient {
                 token_ids.len(),
                 self.config.subscribe_new_markets,
             );
+            // Pre-populate active_delta_subs for all bootstrapped instruments so the initial
+            // WS book snapshot (sent immediately after subscribe_market) is not dropped by
+            // the active_delta_subs.contains() gate in the message handler.
+            for inst in self.instruments.load().values() {
+                self.active_delta_subs.insert(inst.id());
+                self.active_quote_subs.insert(inst.id());
+            }
             self.ws_client.subscribe_market(token_ids).await?;
         } else {
             log::info!("No instruments to subscribe (skipped)");
@@ -1077,6 +1084,20 @@ impl DataClient for PolymarketDataClient {
 
         if needs_ws_sub {
             self.subscribe_ws_market(token_id);
+        }
+
+        // If the adapter already has a populated book (captured from the initial WS snapshot
+        // during connect), re-emit it as deltas so the BookUpdater (which just subscribed)
+        // gets the full book state immediately.
+        if let Some(book) = self.order_books.get(&instrument_id) {
+            if book.update_count > 0 {
+                let ts = self.clock.get_time_ns();
+                let deltas = book.to_deltas(ts, ts);
+                let data: NautilusData = OrderBookDeltas_API::new(deltas).into();
+                if let Err(e) = self.data_sender.send(DataEvent::Data(data)) {
+                    log::error!("Failed to re-emit book snapshot for {instrument_id}: {e}");
+                }
+            }
         }
 
         log::debug!("Subscribed to book deltas for {instrument_id}");
