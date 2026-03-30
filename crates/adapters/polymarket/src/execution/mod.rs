@@ -34,6 +34,7 @@ use log::{debug, info};
 use nautilus_common::{
     cache::fifo::FifoCacheMap,
     clients::ExecutionClient,
+    providers::InstrumentProvider,
     live::{runner::get_exec_event_sender, runtime::get_runtime},
     messages::execution::{
         BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
@@ -187,10 +188,10 @@ impl PolymarketExecutionClient {
             immediate_first: false,
             max_elapsed_ms: Some(180_000),
         };
-        let gamma_http = PolymarketGammaHttpClient::new(None, Some(config.http_timeout_secs), gamma_retry_config)
+        let gamma_http = PolymarketGammaHttpClient::new(config.base_url_gamma.clone(), Some(config.http_timeout_secs), gamma_retry_config)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to create Gamma HTTP client")?;
-        let provider = PolymarketInstrumentProvider::new(gamma_http);
+        let provider = PolymarketInstrumentProvider::with_filters(gamma_http, config.filters.clone());
 
         let data_api_client = PolymarketDataApiHttpClient::new(None, Some(config.http_timeout_secs))
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -357,97 +358,7 @@ impl PolymarketExecutionClient {
                                         "Failed to refresh account after finalized trade: {e}"
                                     ),
                                 }
-                            };
-                            let ts_event = parse_timestamp_ms(&order.timestamp)
-                                .unwrap_or_else(|_| clock.get_time_ns());
-                            let venue_order_id = VenueOrderId::from(order.id.as_str());
-                            let order_status = OrderStatus::from(order.status);
-                            let order_side = OrderSide::from(order.side);
-                            let time_in_force = TimeInForce::from(order.order_type);
-                            let quantity = Quantity::new(
-                                order.original_size.parse::<f64>().unwrap_or(0.0),
-                                instrument.size_precision(),
-                            );
-                            let filled_qty = Quantity::new(
-                                order.size_matched.parse::<f64>().unwrap_or(0.0),
-                                instrument.size_precision(),
-                            );
-                            let price = Price::new(
-                                order.price.parse::<f64>().unwrap_or(0.0),
-                                instrument.price_precision(),
-                            );
-                            let mut report = OrderStatusReport::new(
-                                account_id,
-                                instrument.id(),
-                                None,
-                                venue_order_id,
-                                order_side,
-                                OrderType::Limit,
-                                time_in_force,
-                                order_status,
-                                quantity,
-                                filled_qty,
-                                ts_event,
-                                ts_event,
-                                ts_event,
-                                None,
-                            );
-                            report.price = Some(price);
-
-                            if time_in_force == TimeInForce::Gtd {
-                                if let Some(exp_str) = &order.expiration {
-                                    if let Ok(secs) = exp_str.parse::<u64>() {
-                                        if secs > 0 {
-                                            report = report.with_expire_time(
-                                                UnixNanos::from(secs * 1_000_000_000),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            let is_accepted = fill_tracker.contains(&venue_order_id);
-                            if is_accepted {
-                                emitter.send_order_status_report(report);
-                            } else {
-                                let mut guard = pending_order_reports.lock().expect(MUTEX_POISONED);
-                                if let Some(reports) = guard.get_mut(&venue_order_id) {
-                                    reports.push(report);
-                                } else {
-                                    guard.insert(venue_order_id, vec![report]);
-                                }
-                            }
-
-                            // MATCHED convergence: check for dust residual
-                            if order.status == PolymarketOrderStatus::Matched
-                                && let Some(dust_fill) =
-                                    fill_tracker.check_dust_and_build_fill(
-                                        &venue_order_id,
-                                        account_id,
-                                        &order.id,
-                                        price.as_f64(),
-                                        get_usdc_currency(),
-                                        ts_event,
-                                    )
-                            {
-                                if is_accepted {
-                                    emitter.send_fill_report(dust_fill);
-                                } else {
-                                    let mut guard =
-                                        pending_fills.lock().expect(MUTEX_POISONED);
-
-                                    if let Some(fills) =
-                                        guard.get_mut(&venue_order_id)
-                                    {
-                                        fills.push(dust_fill);
-                                    } else {
-                                        guard.insert(
-                                            venue_order_id,
-                                            vec![dust_fill],
-                                        );
-                                    }
-                                }
-                            }
+                            });
                         }
                     }
                     Some(PolymarketWsMessage::Market(_)) => {}
@@ -1191,6 +1102,17 @@ impl ExecutionClient for PolymarketExecutionClient {
         // Read instruments from global cache (populated by data client)
         self.load_instruments_from_cache();
         self.core.set_instruments_initialized();
+
+        // Load instruments into provider for reconciliation (position reports)
+        if let Err(e) = self
+            .provider
+            .load_all(None::<&std::collections::HashMap<String, String>>)
+            .await
+        {
+            log::warn!("Failed to load instruments for reconciliation provider: {e}");
+        } else {
+            log::info!("Loaded instruments into reconciliation provider");
+        }
 
         self.start_ws_stream().await?;
 

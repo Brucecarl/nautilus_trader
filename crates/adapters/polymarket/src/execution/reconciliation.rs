@@ -36,6 +36,7 @@ use crate::{
         models::{PolymarketOpenOrder, PolymarketTradeReport},
         query::{GetOrdersParams, GetTradesParams},
     },
+    providers::PolymarketInstrumentProvider,
 };
 
 /// Shared context for trade-to-fill-report conversion.
@@ -211,6 +212,13 @@ pub(crate) async fn generate_mass_status(
     lookback_mins: Option<u64>,
 ) -> anyhow::Result<Option<ExecutionMassStatus>> {
     let ts_init = UnixNanos::default();
+    let instruments: AtomicMap<Ustr, InstrumentAny> = {
+        let map = AtomicMap::new();
+        for (k, v) in provider.build_token_map() {
+            map.insert(k, v);
+        }
+        map
+    };
 
     // Fetch orders
     let orders = http_client
@@ -219,7 +227,7 @@ pub(crate) async fn generate_mass_status(
         .context("failed to fetch orders for mass status")?;
 
     let (mut order_reports, orders_filtered) =
-        build_order_reports_from_orders(&orders, instruments, ctx.account_id, None, ts_init);
+        build_order_reports_from_orders(&orders, &instruments, ctx.account_id, None, ts_init);
 
     // Fetch and parse fill reports
     let trades = http_client
@@ -228,7 +236,7 @@ pub(crate) async fn generate_mass_status(
         .context("failed to fetch trades for mass status")?;
 
     let (mut fill_reports, fills_filtered) =
-        build_fill_reports_from_trades(&trades, ctx, instruments, None, ts_init);
+        build_fill_reports_from_trades(&trades, ctx, &instruments, None, ts_init);
 
     // Fetch YES/NO token holdings as position reports via Data API (single call)
     let position_reports =
