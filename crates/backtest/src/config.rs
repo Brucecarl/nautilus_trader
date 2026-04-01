@@ -19,7 +19,9 @@ use std::{fmt::Display, str::FromStr, time::Duration};
 
 use ahash::AHashMap;
 use nautilus_common::{
-    cache::CacheConfig, enums::Environment, logging::logger::LoggerConfig,
+    cache::CacheConfig,
+    enums::Environment,
+    logging::{logger::LoggerConfig, writer::FileWriterConfig},
     msgbus::database::MessageBusConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -199,6 +201,10 @@ impl NautilusKernelConfig for BacktestEngineConfig {
 
     fn logging(&self) -> LoggerConfig {
         self.logging.clone()
+    }
+
+    fn file_writer(&self) -> FileWriterConfig {
+        FileWriterConfig::default()
     }
 
     fn instance_id(&self) -> Option<UUID4> {

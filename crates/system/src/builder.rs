@@ -15,7 +15,11 @@
 
 use std::time::Duration;
 
-use nautilus_common::{cache::CacheConfig, enums::Environment, logging::logger::LoggerConfig};
+use nautilus_common::{
+    cache::CacheConfig,
+    enums::Environment,
+    logging::{logger::LoggerConfig, writer::FileWriterConfig},
+};
 use nautilus_core::UUID4;
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_execution::engine::config::ExecutionEngineConfig;
@@ -194,6 +198,7 @@ impl NautilusKernelBuilder {
             load_state: self.load_state,
             save_state: self.save_state,
             logging: self.logging.unwrap_or_default(),
+            file_writer: FileWriterConfig::default(),
             instance_id: self.instance_id,
             timeout_connection: self.timeout_connection,
             timeout_reconciliation: self.timeout_reconciliation,

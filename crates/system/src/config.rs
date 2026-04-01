@@ -16,7 +16,9 @@
 use std::{fmt::Debug, time::Duration};
 
 use nautilus_common::{
-    cache::CacheConfig, enums::Environment, logging::logger::LoggerConfig,
+    cache::CacheConfig,
+    enums::Environment,
+    logging::{logger::LoggerConfig, writer::FileWriterConfig},
     msgbus::database::MessageBusConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -38,6 +40,8 @@ pub trait NautilusKernelConfig: Debug {
     fn save_state(&self) -> bool;
     /// Returns the logging configuration for the kernel.
     fn logging(&self) -> LoggerConfig;
+    /// Returns the file writer configuration for the kernel.
+    fn file_writer(&self) -> FileWriterConfig;
     /// Returns the unique instance identifier for the kernel.
     fn instance_id(&self) -> Option<UUID4>;
     /// Returns the timeout for all clients to connect and initialize.
@@ -81,6 +85,8 @@ pub struct KernelConfig {
     pub save_state: bool,
     /// The logging configuration for the kernel.
     pub logging: LoggerConfig,
+    /// The file writer configuration for the kernel.
+    pub file_writer: FileWriterConfig,
     /// The unique instance identifier for the kernel
     pub instance_id: Option<UUID4>,
     /// The timeout for all clients to connect and initialize.
@@ -130,6 +136,10 @@ impl NautilusKernelConfig for KernelConfig {
 
     fn logging(&self) -> LoggerConfig {
         self.logging.clone()
+    }
+
+    fn file_writer(&self) -> FileWriterConfig {
+        self.file_writer.clone()
     }
 
     fn instance_id(&self) -> Option<UUID4> {
@@ -197,6 +207,7 @@ impl Default for KernelConfig {
             load_state: false,
             save_state: false,
             logging: LoggerConfig::default(),
+            file_writer: FileWriterConfig::default(),
             instance_id: None,
             timeout_connection: Duration::from_secs(60),
             timeout_reconciliation: Duration::from_secs(30),

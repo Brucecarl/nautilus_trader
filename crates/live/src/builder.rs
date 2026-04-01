@@ -17,7 +17,10 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use nautilus_common::{enums::Environment, logging::logger::LoggerConfig};
+use nautilus_common::{
+    enums::Environment,
+    logging::{logger::LoggerConfig, writer::FileWriterConfig},
+};
 use nautilus_core::UUID4;
 use nautilus_data::client::DataClientAdapter;
 use nautilus_execution::engine::ExecutionEngine;
@@ -184,6 +187,13 @@ impl LiveNodeBuilder {
     #[must_use]
     pub fn with_logging(mut self, logging: LoggerConfig) -> Self {
         self.config.logging = logging;
+        self
+    }
+
+    /// Set the file writer configuration.
+    #[must_use]
+    pub fn with_file_writer(mut self, file_writer: FileWriterConfig) -> Self {
+        self.config.file_writer = file_writer;
         self
     }
 

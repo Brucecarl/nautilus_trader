@@ -101,7 +101,9 @@ impl NautilusKernel {
         let machine_id = Self::determine_machine_id()?;
 
         let logger_config = config.logging();
-        let log_guard = Self::initialize_logging(config.trader_id(), instance_id, logger_config)?;
+        let file_writer_config = config.file_writer();
+        let log_guard =
+            Self::initialize_logging(config.trader_id(), instance_id, logger_config, file_writer_config)?;
         headers::log_header(
             config.trader_id(),
             &machine_id,
@@ -188,6 +190,7 @@ impl NautilusKernel {
         trader_id: TraderId,
         instance_id: UUID4,
         config: LoggerConfig,
+        file_writer_config: FileWriterConfig,
     ) -> anyhow::Result<LogGuard> {
         #[cfg(feature = "tracing-bridge")]
         let use_tracing = config.use_tracing;
@@ -196,7 +199,7 @@ impl NautilusKernel {
             trader_id,
             instance_id,
             config,
-            FileWriterConfig::default(), // TODO: Properly incorporate file writer config
+            file_writer_config,
         ) {
             Ok(guard) => guard,
             Err(e) => {

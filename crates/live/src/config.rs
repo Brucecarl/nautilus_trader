@@ -18,7 +18,9 @@
 use std::{collections::HashMap, time::Duration};
 
 use nautilus_common::{
-    cache::CacheConfig, enums::Environment, logging::logger::LoggerConfig,
+    cache::CacheConfig,
+    enums::Environment,
+    logging::{logger::LoggerConfig, writer::FileWriterConfig},
     msgbus::database::MessageBusConfig,
 };
 use nautilus_core::UUID4;
@@ -318,6 +320,8 @@ pub struct LiveNodeConfig {
     pub save_state: bool,
     /// The logging configuration for the kernel.
     pub logging: LoggerConfig,
+    /// The file writer configuration for the kernel.
+    pub file_writer: FileWriterConfig,
     /// The unique instance identifier for the kernel
     pub instance_id: Option<UUID4>,
     /// The timeout for all clients to connect and initialize.
@@ -360,6 +364,7 @@ impl Default for LiveNodeConfig {
             load_state: false,
             save_state: false,
             logging: LoggerConfig::default(),
+            file_writer: FileWriterConfig::default(),
             instance_id: None,
             timeout_connection: Duration::from_secs(60),
             timeout_reconciliation: Duration::from_secs(30),
@@ -399,6 +404,10 @@ impl NautilusKernelConfig for LiveNodeConfig {
 
     fn logging(&self) -> LoggerConfig {
         self.logging.clone()
+    }
+
+    fn file_writer(&self) -> FileWriterConfig {
+        self.file_writer.clone()
     }
 
     fn instance_id(&self) -> Option<UUID4> {
