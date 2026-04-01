@@ -971,19 +971,23 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     fn update_position(&self, position: &Position) -> anyhow::Result<()> {
-        todo!()
+        warn!("update_position do nothing");
+        Ok(())
     }
 
     fn snapshot_order_state(&self, order: &OrderAny) -> anyhow::Result<()> {
-        todo!()
+        warn!("snapshot_order_state do nothing");
+        Ok(())
     }
 
     fn snapshot_position_state(&self, position: &Position) -> anyhow::Result<()> {
-        todo!()
+        warn!("snapshot_position_state do nothing");
+        Ok(())
     }
 
     fn heartbeat(&self, timestamp: UnixNanos) -> anyhow::Result<()> {
-        todo!()
+        warn!("heartbeat do nothing");
+        Ok(())
     }
 }
 
