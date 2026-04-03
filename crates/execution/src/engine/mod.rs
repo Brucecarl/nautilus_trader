@@ -102,6 +102,7 @@ pub struct ExecutionEngine {
     routing_map: HashMap<Venue, ClientId>,
     oms_overrides: HashMap<StrategyId, OmsType>,
     external_order_claims: HashMap<InstrumentId, StrategyId>,
+    catch_all_external_strategy: Option<StrategyId>,
     external_clients: HashSet<ClientId>,
     pos_id_generator: PositionIdGenerator,
     config: ExecutionEngineConfig,
@@ -131,6 +132,7 @@ impl ExecutionEngine {
             routing_map: HashMap::new(),
             oms_overrides: HashMap::new(),
             external_order_claims: HashMap::new(),
+            catch_all_external_strategy: None,
             external_clients: config
                 .as_ref()
                 .and_then(|c| c.external_clients.clone())
@@ -300,6 +302,12 @@ impl ExecutionEngine {
     /// Returns any external order claim for the given instrument ID.
     pub fn get_external_order_claim(&self, instrument_id: &InstrumentId) -> Option<StrategyId> {
         self.external_order_claims.get(instrument_id).copied()
+    }
+
+    #[must_use]
+    /// Returns the configured catch-all external order claim strategy.
+    pub const fn get_catch_all_external_order_claim(&self) -> Option<StrategyId> {
+        self.catch_all_external_strategy
     }
 
     /// Registers a new execution client.
@@ -554,10 +562,24 @@ impl ExecutionEngine {
                 .insert(*instrument_id, strategy_id);
         }
 
-        if !instrument_ids.is_empty() {
-            log::info!("Registered external order claims for {strategy_id}: {instrument_ids:?}");
-        }
+        // if !instrument_ids.is_empty() {
+        //     log::info!("Registered external order claims for {strategy_id}: {instrument_ids:?}");
+        // }
 
+        Ok(())
+    }
+
+    /// Sets a catch-all strategy to claim all external orders not matched by a specific claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if catch-all is already configured.
+    pub fn set_catch_all_external_strategy(&mut self, strategy_id: StrategyId) -> anyhow::Result<()> {
+        if self.catch_all_external_strategy.is_some() {
+            anyhow::bail!("catch_all_external_strategy can only be set once");
+        }
+        self.catch_all_external_strategy = Some(strategy_id);
+        log::info!("Registered catch-all external order claim for {strategy_id}");
         Ok(())
     }
 
@@ -930,6 +952,7 @@ impl ExecutionEngine {
             .external_order_claims
             .get(&report.instrument_id)
             .copied()
+            .or(self.catch_all_external_strategy)
             .unwrap_or_else(|| StrategyId::from("EXTERNAL"));
 
         let client_order_id = report

@@ -1071,12 +1071,65 @@ impl ExecutionClient for PolymarketExecutionClient {
 
     fn register_external_order(
         &self,
-        _client_order_id: ClientOrderId,
-        _venue_order_id: VenueOrderId,
-        _instrument_id: InstrumentId,
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        instrument_id: InstrumentId,
         _strategy_id: StrategyId,
         _ts_init: UnixNanos,
     ) {
+        // Mark reconciled external orders as "accepted" in the fill tracker so
+        // subsequent WS order/fill updates are emitted instead of buffered forever.
+        let maybe_order = self.core.cache().order(&client_order_id).cloned();
+        let maybe_instrument = self.core.cache().instrument(&instrument_id).cloned();
+        let has_order = maybe_order.is_some();
+        let has_instrument = maybe_instrument.is_some();
+
+        if let (Some(order), Some(instrument)) = (maybe_order, maybe_instrument) {
+            self.fill_tracker.register(
+                venue_order_id,
+                order.quantity(),
+                order.order_side(),
+                instrument_id,
+                instrument.size_precision(),
+                instrument.price_precision(),
+            );
+        } else {
+            log::warn!(
+                "register_external_order missing cache state for {}, order={}, instrument={}",
+                venue_order_id,
+                has_order,
+                has_instrument,
+            );
+        }
+
+        if let Some(buffered) = self
+            .pending_fills
+            .lock()
+            .expect(MUTEX_POISONED)
+            .remove(&venue_order_id)
+        {
+            for mut fill in buffered {
+                fill.last_qty = self.fill_tracker.snap_fill_qty(&venue_order_id, fill.last_qty);
+                self.fill_tracker.record_fill(
+                    &venue_order_id,
+                    fill.last_qty.as_f64(),
+                    fill.last_px.as_f64(),
+                    fill.ts_event,
+                );
+                self.emitter.send_fill_report(fill);
+            }
+        }
+
+        if let Some(buffered) = self
+            .pending_order_reports
+            .lock()
+            .expect(MUTEX_POISONED)
+            .remove(&venue_order_id)
+        {
+            for report in buffered {
+                self.emitter.send_order_status_report(report);
+            }
+        }
     }
 
     fn on_instrument(&mut self, instrument: InstrumentAny) {

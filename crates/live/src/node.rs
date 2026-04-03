@@ -37,6 +37,7 @@
 //! blocking the select loop for the duration of each query.
 
 use std::{
+    collections::HashSet,
     fmt::Debug,
     sync::{
         Arc,
@@ -1168,20 +1169,29 @@ impl LiveNode {
         // Register external order claims before adding strategy (which moves it)
         let strategy_id = StrategyId::from(strategy.component_id().inner().as_str());
         if let Some(claims) = strategy.external_order_claims() {
-            for instrument_id in claims {
+            for instrument_id in &claims {
                 self.exec_manager
-                    .claim_external_orders(instrument_id, strategy_id);
+                    .claim_external_orders(*instrument_id, strategy_id);
             }
+            let claim_set: HashSet<_> = claims.into_iter().collect();
+            self.kernel
+                .exec_engine
+                .borrow_mut()
+                .register_external_order_claims(strategy_id, &claim_set)?;
             log_info!(
                 "Registered external order claims for {}: {:?}",
                 strategy_id,
-                strategy.external_order_claims(),
+                claim_set.len(),
                 color = LogColor::Blue
             );
         }
 
         if strategy.claim_all_external_orders() {
             self.exec_manager.set_catch_all_external_strategy(strategy_id)?;
+            self.kernel
+                .exec_engine
+                .borrow_mut()
+                .set_catch_all_external_strategy(strategy_id)?;
             log_info!(
                 "Registered catch-all external order claim for {}",
                 strategy_id,
