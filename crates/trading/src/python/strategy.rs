@@ -56,7 +56,7 @@ use nautilus_model::{
         OrderUpdated, PositionChanged, PositionClosed, PositionOpened,
     },
     identifiers::{
-        AccountId, ActorId, ClientId, InstrumentId, PositionId, StrategyId, TraderId, Venue,
+        AccountId, ActorId, ClientId, ClientOrderId, InstrumentId, PositionId, StrategyId, TraderId, Venue,
     },
     instruments::InstrumentAny,
     orderbook::OrderBook,
@@ -1237,6 +1237,21 @@ impl PyStrategy {
             .collect::<PyResult<Vec<_>>>()?;
         Strategy::cancel_orders(self.inner_mut(), orders, client_id, params_map)
             .map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "cancel_orders_by_ids")]
+    #[pyo3(signature = (client_order_ids, client_id=None))]
+    fn py_cancel_orders_by_ids(
+        &mut self,
+        client_order_ids: Vec<ClientOrderId>,
+        client_id: Option<ClientId>,
+    ) -> PyResult<()> {
+        Strategy::cancel_orders_by_ids(
+            self.inner_mut(),
+            &client_order_ids,
+            client_id,
+        )
+        .map_err(to_pyruntime_err)
     }
 
     #[pyo3(name = "cancel_all_orders")]

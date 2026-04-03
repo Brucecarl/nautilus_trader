@@ -16,7 +16,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use nautilus_common::{
-    cache::CacheConfig, enums::Environment, logging::logger::LoggerConfig,
+    cache::CacheConfig, enums::Environment, logging::{logger::LoggerConfig, writer::FileWriterConfig},
     msgbus::database::MessageBusConfig,
 };
 use nautilus_core::{UUID4, python::to_pyvalue_err};
@@ -342,13 +342,14 @@ impl LiveNodeConfig {
     /// Configuration for live Nautilus system nodes.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (environment=None, trader_id=None, load_state=None, save_state=None, logging=None, instance_id=None, timeout_connection_secs=None, timeout_reconciliation_secs=None, timeout_portfolio_secs=None, timeout_disconnection_secs=None, delay_post_stop_secs=None, timeout_shutdown_secs=None, cache=None, msgbus=None, portfolio=None, data_engine=None, risk_engine=None, exec_engine=None))]
+    #[pyo3(signature = (environment=None, trader_id=None, load_state=None, save_state=None, logging=None, file_writer=None, instance_id=None, timeout_connection_secs=None, timeout_reconciliation_secs=None, timeout_portfolio_secs=None, timeout_disconnection_secs=None, delay_post_stop_secs=None, timeout_shutdown_secs=None, cache=None, msgbus=None, portfolio=None, data_engine=None, risk_engine=None, exec_engine=None))]
     fn py_new(
         environment: Option<Environment>,
         trader_id: Option<TraderId>,
         load_state: Option<bool>,
         save_state: Option<bool>,
         logging: Option<LoggerConfig>,
+        file_writer: Option<FileWriterConfig>,
         instance_id: Option<UUID4>,
         timeout_connection_secs: Option<f64>,
         timeout_reconciliation_secs: Option<f64>,
@@ -380,6 +381,7 @@ impl LiveNodeConfig {
             load_state: load_state.unwrap_or(default.load_state),
             save_state: save_state.unwrap_or(default.save_state),
             logging: logging.unwrap_or(default.logging),
+            file_writer: file_writer.unwrap_or_default(),
             instance_id,
             timeout_connection: to_duration(
                 timeout_connection_secs.unwrap_or(default.timeout_connection.as_secs_f64()),

@@ -637,6 +637,86 @@ pub trait Strategy: DataActor {
         Ok(())
     }
 
+    /// Batch cancels orders by their client order IDs.
+    ///
+    /// The instrument ID is resolved from the first order in the cache. All orders
+    /// must belong to the same instrument.
+    ///
+    /// This is a lightweight alternative to [`cancel_orders`] that avoids cloning
+    /// full `OrderAny` objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the order ID list is empty, any order is not found in the
+    /// cache, orders span multiple instruments, or contain emulated/local orders.
+    fn cancel_orders_by_ids(
+        &mut self,
+        client_order_ids: &[ClientOrderId],
+        client_id: Option<ClientId>,
+    ) -> anyhow::Result<()> {
+        if client_order_ids.is_empty() {
+            anyhow::bail!("Cannot batch cancel empty order ID list");
+        }
+
+        let core = self.core_mut();
+        let trader_id = core.trader_id().expect("Trader ID not set");
+        let strategy_id = StrategyId::from(core.actor_id().inner().as_str());
+        let ts_init = core.clock().timestamp_ns();
+        let cache = core.cache();
+
+        let first_order = cache
+            .order(&client_order_ids[0])
+            .ok_or_else(|| anyhow::anyhow!("Order not found in cache: {}", client_order_ids[0]))?;
+        let instrument_id = first_order.instrument_id();
+
+        let mut cancels = Vec::with_capacity(client_order_ids.len());
+        for client_order_id in client_order_ids {
+            let order = cache
+                .order(client_order_id)
+                .ok_or_else(|| anyhow::anyhow!("Order not found in cache: {client_order_id}"))?;
+
+            if order.is_emulated() || order.is_active_local() {
+                anyhow::bail!("Cannot include emulated or local orders in batch cancel");
+            }
+
+            if order.instrument_id() != instrument_id {
+                anyhow::bail!(
+                    "Cannot batch cancel orders for different instruments: {} vs {}",
+                    instrument_id,
+                    order.instrument_id()
+                );
+            }
+
+            cancels.push(CancelOrder::new(
+                trader_id,
+                client_id,
+                strategy_id,
+                instrument_id,
+                *client_order_id,
+                order.venue_order_id(),
+                UUID4::new(),
+                ts_init,
+                None,
+            ));
+        }
+
+        drop(cache);
+        let manager = core.order_manager();
+        let command = BatchCancelOrders::new(
+            trader_id,
+            client_id,
+            strategy_id,
+            instrument_id,
+            cancels,
+            UUID4::new(),
+            ts_init,
+            None,
+        );
+
+        manager.send_exec_command(TradingCommand::BatchCancelOrders(command));
+        Ok(())
+    }
+
     /// Cancels all open orders for the given instrument.
     ///
     /// # Errors
@@ -2881,5 +2961,85 @@ mod tests {
         };
         assert_eq!(custom.core().config.strategy_id, config.strategy_id);
         assert!(custom.external_order_claims().is_none());
+    }
+
+    fn create_test_market_order(client_order_id: &str) -> OrderAny {
+        OrderAny::Market(MarketOrder::new(
+            TraderId::from("TRADER-001"),
+            StrategyId::from("TEST-001"),
+            InstrumentId::from("BTCUSDT.BINANCE"),
+            ClientOrderId::from(client_order_id),
+            OrderSide::Buy,
+            Quantity::from(100_000),
+            TimeInForce::Gtc,
+            UUID4::new(),
+            UnixNanos::default(),
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+    }
+
+    #[rstest]
+    fn test_cancel_orders_by_ids_when_registered() {
+        let mut strategy = create_test_strategy();
+        register_strategy(&mut strategy);
+        start_strategy(&mut strategy);
+
+        let mut order1 = create_test_market_order("O-001");
+        let mut order2 = create_test_market_order("O-002");
+        let id1 = order1.client_order_id();
+        let id2 = order2.client_order_id();
+
+        let submitted1 = OrderSubmitted::new(
+            order1.trader_id(), order1.strategy_id(), order1.instrument_id(),
+            order1.client_order_id(), AccountId::from("ACC-001"),
+            UUID4::new(), 0.into(), 0.into(),
+        );
+        let submitted2 = OrderSubmitted::new(
+            order2.trader_id(), order2.strategy_id(), order2.instrument_id(),
+            order2.client_order_id(), AccountId::from("ACC-001"),
+            UUID4::new(), 0.into(), 0.into(),
+        );
+        order1.apply(OrderEventAny::Submitted(submitted1)).unwrap();
+        order2.apply(OrderEventAny::Submitted(submitted2)).unwrap();
+
+        {
+            let cache_rc = strategy.core.actor.cache_rc();
+            let mut cache = cache_rc.borrow_mut();
+            cache.add_order(order1, None, None, true).unwrap();
+            cache.add_order(order2, None, None, true).unwrap();
+        }
+
+        let result = strategy.cancel_orders_by_ids(&[id1, id2], None);
+        assert!(result.is_ok(), "cancel_orders_by_ids failed: {}", result.unwrap_err());
+    }
+
+    #[rstest]
+    fn test_cancel_orders_by_ids_empty_list_errors() {
+        let mut strategy = create_test_strategy();
+        register_strategy(&mut strategy);
+        start_strategy(&mut strategy);
+
+        let result = strategy.cancel_orders_by_ids(&[], None);
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_cancel_orders_by_ids_order_not_in_cache_errors() {
+        let mut strategy = create_test_strategy();
+        register_strategy(&mut strategy);
+        start_strategy(&mut strategy);
+
+        let ids = vec![ClientOrderId::from("O-MISSING")];
+        let result = strategy.cancel_orders_by_ids(&ids, None);
+        assert!(result.is_err());
     }
 }
