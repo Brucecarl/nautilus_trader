@@ -137,7 +137,7 @@ pub fn parse_order_status_report(
         price_precision,
     );
 
-    let ts_accepted = UnixNanos::from(order.created_at * 1_000_000); // ms -> ns
+    let ts_accepted = UnixNanos::from(order.created_at * 1_000_000_000); // s -> ns
 
     let mut report = OrderStatusReport::new(
         account_id,
