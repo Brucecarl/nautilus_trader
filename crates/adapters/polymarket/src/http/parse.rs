@@ -344,6 +344,11 @@ fn build_info_json(def: &PolymarketInstrumentDef) -> serde_json::Value {
             "outcome_prices".to_string(),
             serde_json::Value::String(outcome_prices.clone()),
         );
+    }else{
+        map.insert(
+            "outcome_prices".to_string(),
+            serde_json::Value::String("[\"0.0\", \"0.0\"]".to_string()),
+        );
     }
 
     serde_json::Value::Object(map)
