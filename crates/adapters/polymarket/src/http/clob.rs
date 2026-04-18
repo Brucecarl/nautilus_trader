@@ -31,20 +31,21 @@ use nautilus_network::http::{HttpClient, HttpClientError, Method, USER_AGENT};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    common::{credential::Credential, enums::PolymarketOrderType, urls::clob_http_url},
+    common::{consts::CHAIN_ID, credential::Credential, enums::PolymarketOrderType, urls::clob_http_url},
     http::{
         error::{Error, Result},
         models::{
-            ClobBookResponse, FeeRateResponse, PolymarketOpenOrder, PolymarketOrder,
+            ClobBookResponse, ClobMarketInfo, PolymarketOpenOrder, PolymarketOrder,
             PolymarketTradeReport, TickSizeResponse,
         },
         query::{
             BalanceAllowance, BatchCancelResponse, CancelMarketOrdersParams, CancelResponse,
-            GetBalanceAllowanceParams, GetOrdersParams, GetTradesParams, OrderResponse,
-            PaginatedResponse,
+            DerivedCredential, GetBalanceAllowanceParams, GetOrdersParams, GetTradesParams,
+            OrderResponse, PaginatedResponse,
         },
         rate_limits::POLYMARKET_CLOB_REST_QUOTA,
     },
+    signing::eip712::{OrderSigner, sign_clob_auth_with_chain_id},
     websocket::parse::{parse_price, parse_quantity},
 };
 
@@ -133,6 +134,23 @@ impl PolymarketClobHttpClient {
 
     fn timestamp(&self) -> String {
         (self.clock.get_time_ns().as_u64() / 1_000_000_000).to_string()
+    }
+
+    fn l1_auth_headers(
+        &self,
+        private_key: &crate::common::credential::EvmPrivateKey,
+        nonce: u64,
+    ) -> Result<HashMap<String, String>> {
+        let timestamp = self.timestamp();
+        // L1 ClobAuth always signs against Polygon mainnet (137) regardless of order chain.
+        let (address, signature) =
+            sign_clob_auth_with_chain_id(private_key, &timestamp, nonce, CHAIN_ID)?;
+        Ok(HashMap::from([
+            ("POLY_ADDRESS".to_string(), address),
+            ("POLY_SIGNATURE".to_string(), signature),
+            ("POLY_TIMESTAMP".to_string(), timestamp),
+            ("POLY_NONCE".to_string(), nonce.to_string()),
+        ]))
     }
 
     fn auth_headers(&self, method: &str, path: &str, body: &str) -> HashMap<String, String> {
@@ -429,10 +447,40 @@ impl PolymarketClobHttpClient {
         self.send_get("/tick-size", Some(&params), false).await
     }
 
-    /// Fetches the fee rate (in basis points) for a token from the CLOB API.
-    pub async fn get_fee_rate(&self, token_id: &str) -> Result<FeeRateResponse> {
-        let params = [("token_id", token_id)];
-        self.send_get("/fee-rate", Some(&params), false).await
+    /// Fetches combined market info (tick size and minimum order size) for a condition ID.
+    ///
+    /// Replaces the separate `/tick-size` and `/fee-rate` calls in CLOB v2.
+    pub async fn get_clob_market_info(&self, condition_id: &str) -> Result<ClobMarketInfo> {
+        let params = [("condition_id", condition_id)];
+        self.send_get("/clob-market-info", Some(&params), false).await
+    }
+
+    /// Derives API credentials from a private key via the L1 EIP-712 auth flow.
+    ///
+    /// Calls `GET /auth/derive-api-key` with L1 headers signed by `private_key`.
+    /// The L1 ClobAuth signature always uses Polygon mainnet (chain ID 137).
+    /// Returns `(api_key, secret, passphrase)` ready for use with [`Credential`].
+    pub async fn derive_api_key(
+        &self,
+        private_key: &crate::common::credential::EvmPrivateKey,
+        nonce: u64,
+    ) -> Result<DerivedCredential> {
+        let headers = self.l1_auth_headers(private_key, nonce)?;
+        let url = self.url("/auth/derive-api-key");
+        let response = self
+            .client
+            .request(Method::GET, url, None, Some(headers), None, None, None)
+            .await
+            .map_err(Error::from_http_client)?;
+
+        if response.status.is_success() {
+            serde_json::from_slice(&response.body).map_err(Error::Serde)
+        } else {
+            Err(Error::from_status_code(
+                response.status.as_u16(),
+                &response.body,
+            ))
+        }
     }
 
     /// Fetches the order book for a token from the CLOB API (public endpoint).

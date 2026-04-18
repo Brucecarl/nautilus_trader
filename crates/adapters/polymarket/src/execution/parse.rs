@@ -258,7 +258,8 @@ pub fn build_maker_fill_report(
         mo.price.to_string().parse::<f64>().unwrap_or(0.0),
         price_precision,
     );
-    let commission_value = compute_commission(mo.fee_rate_bps, mo.matched_amount, mo.price);
+    // In CLOB v2, makers pay zero commission (makers incur no fees per the protocol).
+    let commission_value = compute_commission(Decimal::ZERO, mo.matched_amount, mo.price);
 
     FillReport {
         account_id,

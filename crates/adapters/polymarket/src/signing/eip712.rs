@@ -33,7 +33,7 @@ use alloy_primitives::{Address, B256, U256, address};
 use rust_decimal::Decimal;
 
 use crate::{
-    common::{credential::EvmPrivateKey, enums::PolymarketOrderSide},
+    common::{consts::CHAIN_ID, credential::EvmPrivateKey, enums::PolymarketOrderSide},
     http::{
         error::{Error, Result},
         models::PolymarketOrder,
@@ -45,15 +45,14 @@ const CLOB_AUTH_DOMAIN_NAME: &str = "ClobAuthDomain";
 const CLOB_AUTH_DOMAIN_VERSION: &str = "1";
 const CLOB_AUTH_MESSAGE: &str = "This message attests that I control the given wallet";
 
-/// CTF Exchange contract address on Polygon mainnet.
-pub const CTF_EXCHANGE: Address = address!("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
+/// CTF Exchange contract address on Polygon mainnet (v2).
+pub const CTF_EXCHANGE: Address = address!("0xE111180000d2663C0091e4f400237545B87B996B");
 
-/// Neg Risk CTF Exchange contract address on Polygon mainnet.
-pub const NEG_RISK_CTF_EXCHANGE: Address = address!("0xC5d563A36AE78145C45a50134d48A1215220f80a");
+/// Neg Risk CTF Exchange contract address on Polygon mainnet (v2).
+pub const NEG_RISK_CTF_EXCHANGE: Address = address!("0xe2222d279d744050d28e00520010520000310F59");
 
 const DOMAIN_NAME: &str = "Polymarket CTF Exchange";
-const DOMAIN_VERSION: &str = "1";
-const POLYGON_CHAIN_ID: u64 = 137;
+const DOMAIN_VERSION: &str = "2";
 
 // EIP-712 ClobAuth struct for L1 API authentication.
 //
@@ -67,23 +66,23 @@ alloy::sol! {
     }
 }
 
-// EIP-712 Order struct matching the CTFExchange contract.
+// EIP-712 Order struct matching the CTFExchange v2 contract.
 //
-// Reference: <https://github.com/Polymarket/ctf-exchange/blob/main/src/exchange/libraries/OrderStructs.sol>
+// Note: `expiration` is sent in the API payload but is NOT part of the signed struct.
+// Reference: <https://github.com/Polymarket/clob-client-v2/blob/main/src/order-utils/model/ctfExchangeV2TypedData.ts>
 alloy::sol! {
     struct Order {
         uint256 salt;
         address maker;
         address signer;
-        address taker;
         uint256 tokenId;
         uint256 makerAmount;
         uint256 takerAmount;
-        uint256 expiration;
-        uint256 nonce;
-        uint256 feeRateBps;
         uint8 side;
         uint8 signatureType;
+        uint256 timestamp;
+        bytes32 metadata;
+        bytes32 builder;
     }
 }
 
@@ -114,12 +113,28 @@ impl OrderSigner {
     /// Signs a [`PolymarketOrder`] and returns the hex-encoded ECDSA signature.
     ///
     /// The `neg_risk` flag selects which exchange contract to use as the
-    /// EIP-712 `verifyingContract`.
+    /// EIP-712 `verifyingContract`. Uses the Polygon mainnet chain ID (137).
     ///
     /// # Errors
     ///
     /// Returns an error if `order.signer` does not match this signer's address.
     pub fn sign_order(&self, order: &PolymarketOrder, neg_risk: bool) -> Result<String> {
+        self.sign_order_with_chain_id(order, neg_risk, CHAIN_ID)
+    }
+
+    /// Signs a [`PolymarketOrder`] with an explicit `chain_id`.
+    ///
+    /// Use this when targeting a non-mainnet environment (e.g. Amoy testnet, chain ID 80002).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `order.signer` does not match this signer's address.
+    pub fn sign_order_with_chain_id(
+        &self,
+        order: &PolymarketOrder,
+        neg_risk: bool,
+        chain_id: u64,
+    ) -> Result<String> {
         let order_signer = parse_address(&order.signer, "signer")?;
         if order_signer != self.signer.address() {
             return Err(Error::bad_request(format!(
@@ -139,7 +154,7 @@ impl OrderSigner {
         let domain = eip712_domain! {
             name: DOMAIN_NAME,
             version: DOMAIN_VERSION,
-            chain_id: POLYGON_CHAIN_ID,
+            chain_id: chain_id,
             verifying_contract: contract,
         };
 
@@ -173,6 +188,20 @@ pub fn sign_clob_auth(
     timestamp: &str,
     nonce: u64,
 ) -> Result<(String, String)> {
+    sign_clob_auth_with_chain_id(private_key, timestamp, nonce, CHAIN_ID)
+}
+
+/// Signs a ClobAuth EIP-712 message with an explicit `chain_id`.
+///
+/// Use this when targeting a non-mainnet environment (e.g. Amoy testnet, chain ID 80002).
+///
+/// Returns `(signer_address_hex, signature_hex)`.
+pub fn sign_clob_auth_with_chain_id(
+    private_key: &EvmPrivateKey,
+    timestamp: &str,
+    nonce: u64,
+    chain_id: u64,
+) -> Result<(String, String)> {
     let key_hex = private_key
         .as_hex()
         .strip_prefix("0x")
@@ -192,7 +221,7 @@ pub fn sign_clob_auth(
     let domain = eip712_domain! {
         name: CLOB_AUTH_DOMAIN_NAME,
         version: CLOB_AUTH_DOMAIN_VERSION,
-        chain_id: POLYGON_CHAIN_ID,
+        chain_id: chain_id,
     };
 
     let signing_hash = auth.eip712_signing_hash(&domain);
@@ -216,18 +245,15 @@ fn build_eip712_order(order: &PolymarketOrder) -> Result<Order> {
         salt: U256::from(order.salt),
         maker: parse_address(&order.maker, "maker")?,
         signer: parse_address(&order.signer, "signer")?,
-        taker: parse_address(&order.taker, "taker")?,
         tokenId: U256::from_str(order.token_id.as_str())
             .map_err(|e| Error::bad_request(format!("Invalid token ID: {e}")))?,
         makerAmount: decimal_to_u256(order.maker_amount, "maker_amount")?,
         takerAmount: decimal_to_u256(order.taker_amount, "taker_amount")?,
-        expiration: U256::from_str(&order.expiration)
-            .map_err(|e| Error::bad_request(format!("Invalid expiration: {e}")))?,
-        nonce: U256::from_str(&order.nonce)
-            .map_err(|e| Error::bad_request(format!("Invalid nonce: {e}")))?,
-        feeRateBps: decimal_to_u256(order.fee_rate_bps, "fee_rate_bps")?,
         side: order_side_to_u8(order.side),
         signatureType: order.signature_type as u8,
+        timestamp: U256::from(order.timestamp),
+        metadata: order.metadata,
+        builder: order.builder,
     })
 }
 
@@ -277,15 +303,15 @@ mod tests {
             salt: 123456789,
             maker: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".to_string(),
             signer: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".to_string(),
-            taker: "0x0000000000000000000000000000000000000000".to_string(),
             token_id: Ustr::from(
                 "71321045679252212594626385532706912750332728571942532289631379312455583992563",
             ),
             maker_amount: dec!(100000000),
             taker_amount: dec!(50000000),
             expiration: "0".to_string(),
-            nonce: "0".to_string(),
-            fee_rate_bps: dec!(0),
+            timestamp: 1_000_000_000_000u64,
+            metadata: alloy_primitives::B256::ZERO,
+            builder: alloy_primitives::B256::ZERO,
             side: PolymarketOrderSide::Buy,
             signature_type: SignatureType::Eoa,
             signature: String::new(),
@@ -294,9 +320,8 @@ mod tests {
 
     #[rstest]
     fn test_order_typehash_matches_contract() {
-        // ORDER_TYPEHASH from the CTFExchange Solidity contract
         let expected = keccak256(
-            "Order(uint256 salt,address maker,address signer,address taker,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint256 expiration,uint256 nonce,uint256 feeRateBps,uint8 side,uint8 signatureType)",
+            "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)",
         );
         let order = test_order();
         let eip712_order = build_eip712_order(&order).unwrap();
@@ -378,6 +403,9 @@ mod tests {
         assert_eq!(eip712.takerAmount, U256::from(50000000u128));
         assert_eq!(eip712.side, 0); // BUY
         assert_eq!(eip712.signatureType, 0); // EOA
+        assert_eq!(eip712.timestamp, U256::from(1_000_000_000_000u64));
+        assert_eq!(eip712.metadata, alloy_primitives::B256::ZERO);
+        assert_eq!(eip712.builder, alloy_primitives::B256::ZERO);
     }
 
     #[rstest]
@@ -417,6 +445,94 @@ mod tests {
         assert_ne!(CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE);
     }
 
+    // -----------------------------------------------------------------------
+    // Tests ported from the TS reference (clob-client-v2)
+    // -----------------------------------------------------------------------
+
+    // Ported from tests/signing/eip712.test.ts → "buildClobEip712Signature"
+    // Private key: Hardhat account #0 (publicly known)
+    // Chain: AMOY (80002), timestamp="10000000", nonce=23
+    // Expected signature verified by the TS test suite.
+    #[rstest]
+    fn test_sign_clob_auth_amoy_matches_ts_reference() {
+        let pk = EvmPrivateKey::new(TEST_PRIVATE_KEY).unwrap();
+        let (_addr, sig) = sign_clob_auth_with_chain_id(&pk, "10000000", 23, 80002).unwrap();
+        assert_eq!(
+            sig,
+            "0xf62319a987514da40e57e2f4d7529f7bac38f0355bd88bb5adbb3768d80de6c1682518e0af677d5260366425f4361e7b70c25ae232aff0ab2331e2b164a1aedc1b"
+        );
+    }
+
+    // Ported from tests/order-builder/helpers/createOrder.test.ts
+    // BUY 0.5 price, 21.04 size, tickSize=0.1 (tick_decimals=1) → makerAmount=10520000, takerAmount=21040000
+    // BUY 0.56 price, 21.04 size, tickSize=0.01 (tick_decimals=2) → makerAmount=11782400, takerAmount=21040000
+    // SELL 0.5 price, 21.04 size, tickSize=0.1 → makerAmount=21040000, takerAmount=10520000
+    // SELL 0.56 price, 21.04 size, tickSize=0.01 → makerAmount=21040000, takerAmount=11782400
+    #[rstest]
+    #[case(dec!(0.5), dec!(21.04), PolymarketOrderSide::Buy, 1, dec!(10_520_000), dec!(21_040_000))]
+    #[case(dec!(0.56), dec!(21.04), PolymarketOrderSide::Buy, 2, dec!(11_782_400), dec!(21_040_000))]
+    #[case(dec!(0.056), dec!(21.04), PolymarketOrderSide::Buy, 3, dec!(1_178_240), dec!(21_040_000))]
+    #[case(dec!(0.0056), dec!(21.04), PolymarketOrderSide::Buy, 4, dec!(117_824), dec!(21_040_000))]
+    #[case(dec!(0.5), dec!(21.04), PolymarketOrderSide::Sell, 1, dec!(21_040_000), dec!(10_520_000))]
+    #[case(dec!(0.56), dec!(21.04), PolymarketOrderSide::Sell, 2, dec!(21_040_000), dec!(11_782_400))]
+    #[case(dec!(0.056), dec!(21.04), PolymarketOrderSide::Sell, 3, dec!(21_040_000), dec!(1_178_240))]
+    #[case(dec!(0.0056), dec!(21.04), PolymarketOrderSide::Sell, 4, dec!(21_040_000), dec!(117_824))]
+    fn test_create_order_amounts_match_ts_reference(
+        #[case] price: Decimal,
+        #[case] quantity: Decimal,
+        #[case] side: PolymarketOrderSide,
+        #[case] tick_decimals: u32,
+        #[case] expected_maker: Decimal,
+        #[case] expected_taker: Decimal,
+    ) {
+        use crate::execution::order_builder::compute_maker_taker_amounts;
+        let (maker, taker) = compute_maker_taker_amounts(price, quantity, side, tick_decimals);
+        assert_eq!(maker, expected_maker, "makerAmount mismatch");
+        assert_eq!(taker, expected_taker, "takerAmount mismatch");
+    }
+
+    // Verifies signed orders have non-empty signature, correct maker/signer, and v2 fields.
+    // Ported from createOrder.test.ts structural assertions.
+    #[rstest]
+    fn test_signed_order_v2_fields() {
+        use crate::execution::order_builder::compute_maker_taker_amounts;
+
+        let signer = test_signer();
+        let eoa = format!("{:#x}", signer.address());
+        let (maker_amount, taker_amount) = compute_maker_taker_amounts(
+            dec!(0.5),
+            dec!(21.04),
+            PolymarketOrderSide::Buy,
+            1,
+        );
+
+        let order = PolymarketOrder {
+            salt: 1,
+            maker: eoa.clone(),
+            signer: eoa.clone(),
+            token_id: Ustr::from("123"),
+            maker_amount,
+            taker_amount,
+            expiration: "0".to_string(),
+            timestamp: 1_000_000_000_000u64,
+            metadata: alloy_primitives::B256::ZERO,
+            builder: alloy_primitives::B256::ZERO,
+            side: PolymarketOrderSide::Buy,
+            signature_type: SignatureType::Eoa,
+            signature: String::new(),
+        };
+
+        let sig = signer.sign_order_with_chain_id(&order, false, 80002).unwrap();
+
+        assert!(sig.starts_with("0x"), "signature must start with 0x");
+        assert_eq!(sig.len(), 132, "signature must be 0x + 64r + 64s + 2v");
+        assert_eq!(order.maker, eoa);
+        assert_eq!(order.signer, eoa, "EOA: signer must equal maker");
+        assert_eq!(order.expiration, "0");
+        assert_eq!(order.metadata, alloy_primitives::B256::ZERO);
+        assert_eq!(order.builder, alloy_primitives::B256::ZERO);
+    }
+
     #[rstest]
     fn test_sign_order_recoverable() {
         use alloy_primitives::Signature;
@@ -439,7 +555,7 @@ mod tests {
         let domain = eip712_domain! {
             name: DOMAIN_NAME,
             version: DOMAIN_VERSION,
-            chain_id: POLYGON_CHAIN_ID,
+            chain_id: CHAIN_ID,
             verifying_contract: CTF_EXCHANGE,
         };
         let signing_hash = eip712_order.eip712_signing_hash(&domain);

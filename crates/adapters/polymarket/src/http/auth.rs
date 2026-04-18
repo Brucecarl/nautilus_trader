@@ -19,22 +19,12 @@ use std::collections::HashMap;
 
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_network::http::{HttpClient, Method};
-use serde::Deserialize;
 
 use crate::{
     common::{credential::EvmPrivateKey, urls::clob_http_url},
-    http::error::{Error, Result},
+    http::{error::{Error, Result}, query::DerivedCredential},
     signing::eip712::sign_clob_auth,
 };
-
-/// API credentials returned by the Polymarket CLOB auth endpoints.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApiCredentials {
-    pub api_key: String,
-    pub secret: String,
-    pub passphrase: String,
-}
 
 /// Creates new API credentials via `POST /auth/api-key` using L1 authentication.
 ///
@@ -45,7 +35,7 @@ pub async fn create_api_key(
     private_key: &EvmPrivateKey,
     nonce: u64,
     base_url: Option<&str>,
-) -> Result<ApiCredentials> {
+) -> Result<DerivedCredential> {
     let (client, headers, base) = prepare_l1_request(private_key, nonce, base_url)?;
 
     let url = format!("{base}/auth/api-key");
@@ -73,7 +63,7 @@ pub async fn derive_api_key(
     private_key: &EvmPrivateKey,
     nonce: u64,
     base_url: Option<&str>,
-) -> Result<ApiCredentials> {
+) -> Result<DerivedCredential> {
     let (client, headers, base) = prepare_l1_request(private_key, nonce, base_url)?;
 
     let url = format!("{base}/auth/derive-api-key");
@@ -102,7 +92,7 @@ pub async fn create_or_derive_api_key(
     private_key: &EvmPrivateKey,
     nonce: u64,
     base_url: Option<&str>,
-) -> Result<ApiCredentials> {
+) -> Result<DerivedCredential> {
     match create_api_key(private_key, nonce, base_url).await {
         Ok(creds) => Ok(creds),
         Err(e) if e.is_http_status_error() => derive_api_key(private_key, nonce, base_url).await,

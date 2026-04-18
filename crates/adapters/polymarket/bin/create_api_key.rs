@@ -26,7 +26,8 @@
 //! ```
 
 use nautilus_polymarket::{
-    common::credential::EvmPrivateKey, http::auth::create_or_derive_api_key,
+    common::credential::EvmPrivateKey,
+    http::auth::create_or_derive_api_key,
 };
 
 #[tokio::main]

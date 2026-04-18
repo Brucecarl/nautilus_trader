@@ -50,6 +50,8 @@ pub struct PolymarketUserOrder {
     pub timestamp: String,
     #[serde(rename = "type")]
     pub event_type: PolymarketEventType,
+    #[serde(default)]
+    pub builder_code: Option<String>,
 }
 
 /// A user trade update from the WebSocket user channel.
@@ -59,7 +61,6 @@ pub struct PolymarketUserOrder {
 pub struct PolymarketUserTrade {
     pub asset_id: Ustr,
     pub bucket_index: u64,
-    pub fee_rate_bps: String,
     pub id: String,
     pub last_update: String,
     pub maker_address: Ustr,
@@ -415,7 +416,6 @@ mod tests {
         assert_eq!(trade.trader_side, PolymarketLiquiditySide::Taker);
         assert_eq!(trade.price, "0.5");
         assert_eq!(trade.size, "25.0");
-        assert_eq!(trade.fee_rate_bps, "0");
         assert_eq!(trade.bucket_index, 1);
         assert_eq!(trade.maker_orders.len(), 1);
         assert_eq!(

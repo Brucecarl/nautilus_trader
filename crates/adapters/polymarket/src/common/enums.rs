@@ -47,6 +47,7 @@ pub enum SignatureType {
     Eoa = 0,
     PolyProxy = 1,
     PolyGnosisSafe = 2,
+    Poly1271 = 3,
 }
 
 /// Outcome label for a Polymarket market token.
@@ -296,6 +297,10 @@ mod tests {
             serde_json::to_string(&SignatureType::PolyGnosisSafe).unwrap(),
             "2"
         );
+        assert_eq!(
+            serde_json::to_string(&SignatureType::Poly1271).unwrap(),
+            "3"
+        );
     }
 
     #[rstest]
@@ -311,6 +316,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SignatureType>("2").unwrap(),
             SignatureType::PolyGnosisSafe
+        );
+        assert_eq!(
+            serde_json::from_str::<SignatureType>("3").unwrap(),
+            SignatureType::Poly1271
         );
     }
 

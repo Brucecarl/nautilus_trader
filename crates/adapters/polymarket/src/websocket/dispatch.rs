@@ -367,10 +367,10 @@ fn build_ws_taker_fill_report(
         instrument.price_precision(),
     );
 
-    let fee_bps: Decimal = trade.fee_rate_bps.parse().unwrap_or_default();
+    // In CLOB v2, fee_rate_bps is no longer embedded in user trade messages.
     let size: Decimal = trade.size.parse().unwrap_or_default();
     let price_dec: Decimal = trade.price.parse().unwrap_or_default();
-    let commission_value = compute_commission(fee_bps, size, price_dec);
+    let commission_value = compute_commission(Decimal::ZERO, size, price_dec);
     let usdc = crate::execution::get_usdc_currency();
 
     FillReport {

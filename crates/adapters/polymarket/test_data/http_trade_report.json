@@ -18,7 +18,6 @@
   "maker_orders": [
     {
       "asset_id": "71321045679252212594626385532706912750332728571942532289631379312455583992563",
-      "fee_rate_bps": "0",
       "maker_address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
       "matched_amount": "25.0000",
       "order_id": "0xmaker01maker01maker01maker01maker01maker01maker01maker01maker01maker01",
@@ -28,7 +27,6 @@
     },
     {
       "asset_id": "71321045679252212594626385532706912750332728571942532289631379312455583992563",
-      "fee_rate_bps": "10",
       "maker_address": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
       "matched_amount": "5.0000",
       "order_id": "0xmaker02maker02maker02maker02maker02maker02maker02maker02maker02maker02",

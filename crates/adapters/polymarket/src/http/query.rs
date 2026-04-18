@@ -306,6 +306,15 @@ pub struct PaginatedResponse<T> {
     pub next_cursor: String,
 }
 
+/// API credentials returned by `/auth/derive-api-key` or `/auth/api-key`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedCredential {
+    pub api_key: String,
+    pub secret: String,
+    pub passphrase: String,
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

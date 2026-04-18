@@ -412,6 +412,13 @@ async fn handle_get_order(State(state): State<TestServerState>) -> Response {
     }
 }
 
+async fn handle_clob_market_info(
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let _condition_id = params.get("condition_id").cloned().unwrap_or_default();
+    Json(load_json("clob_market_info.json")).into_response()
+}
+
 async fn handle_health() -> impl IntoResponse {
     StatusCode::OK
 }
@@ -434,6 +441,7 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/tags", get(handle_gamma_tags))
         .route("/public-search", get(handle_public_search))
         .route("/trades", get(handle_data_api_trades))
+        .route("/clob-market-info", get(handle_clob_market_info))
         .route("/health", get(handle_health))
         .with_state(state)
 }
@@ -1759,4 +1767,99 @@ async fn test_request_trade_ticks_empty_response() {
         .unwrap();
 
     assert!(ticks.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// get_clob_market_info — mock server test
+// ---------------------------------------------------------------------------
+
+#[rstest]
+#[tokio::test]
+async fn test_get_clob_market_info_returns_tick_and_order_size() {
+    let state = TestServerState::default();
+    let addr = start_mock_server(state.clone()).await;
+    let client = create_clob_client(&addr);
+
+    let info = client
+        .get_clob_market_info("0xdd22472e552920b8438158ea7238bfadfa4f736aa4cee91a6b86c39ead110917")
+        .await
+        .unwrap();
+
+    assert_eq!(info.mts, "0.01");
+    assert_eq!(info.mos, "5");
+}
+
+// ---------------------------------------------------------------------------
+// Live integration tests against https://clob-v2.polymarket.com
+//
+// These are `#[ignore]`d by default.  Run with:
+//   cargo test -p nautilus-polymarket -- --ignored live_
+// ---------------------------------------------------------------------------
+
+const CLOB_V2_URL: &str = "https://clob-v2.polymarket.com";
+
+// Test token IDs from the v2 migration doc (US/Iran nuclear deal market)
+const LIVE_TOKEN_ID: &str =
+    "102936224134271070189104847090829839924697394514566827387181305960175107677216";
+
+// Test condition ID for the same market (the first 32 bytes / condition hash)
+// Use a well-known preprod condition from the v2 migration doc test markets.
+const LIVE_CONDITION_ID: &str =
+    "0xdd22472e552920b8438158ea7238bfadfa4f736aa4cee91a6b86c39ead110917";
+
+fn create_live_clob_client() -> PolymarketClobHttpClient {
+    // Uses a dummy credential — only unauthenticated endpoints are called.
+    let dummy_secret = "dGVzdF9zZWNyZXRfa2V5XzMyYnl0ZXNfcGFkMTIzNDU=";
+    let cred = Credential::new("live_test_key", dummy_secret, "live_test_pass".to_string())
+        .expect("valid credential");
+    PolymarketClobHttpClient::new(
+        cred,
+        "0x0000000000000000000000000000000000000000".to_string(),
+        Some(CLOB_V2_URL.to_string()),
+        Some(10),
+    )
+    .expect("valid client")
+}
+
+#[rstest]
+#[tokio::test]
+#[ignore = "live test: requires network access to clob-v2.polymarket.com"]
+async fn live_get_book_v2_returns_bids_and_asks() {
+    let client = create_live_clob_client();
+
+    let book = client.get_book(LIVE_TOKEN_ID).await.unwrap();
+
+    assert!(
+        !book.bids.is_empty() || !book.asks.is_empty(),
+        "Expected at least one side of the book to have levels"
+    );
+    // Verify price strings are parseable decimals
+    if let Some(bid) = book.bids.first() {
+        bid.price.parse::<f64>().expect("bid price is a decimal");
+        bid.size.parse::<f64>().expect("bid size is a decimal");
+    }
+    if let Some(ask) = book.asks.first() {
+        ask.price.parse::<f64>().expect("ask price is a decimal");
+        ask.size.parse::<f64>().expect("ask size is a decimal");
+    }
+}
+
+#[rstest]
+#[tokio::test]
+#[ignore = "live test: requires network access to clob-v2.polymarket.com (endpoint active after April 22 cutover)"]
+async fn live_get_clob_market_info_returns_valid_fields() {
+    let client = create_live_clob_client();
+
+    let info = client.get_clob_market_info(LIVE_CONDITION_ID).await.unwrap();
+
+    assert!(
+        !info.mts.is_empty(),
+        "mts (min tick size) should be non-empty"
+    );
+    assert!(
+        !info.mos.is_empty(),
+        "mos (min order size) should be non-empty"
+    );
+    info.mts.parse::<f64>().expect("mts is a decimal string");
+    info.mos.parse::<f64>().expect("mos is a decimal string");
 }

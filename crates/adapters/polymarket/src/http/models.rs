@@ -15,6 +15,7 @@
 
 //! HTTP REST model types for the Polymarket CLOB API.
 
+use alloy_primitives::B256;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
@@ -28,16 +29,40 @@ use crate::common::{
     parse::{deserialize_decimal_from_str, serialize_decimal_as_str},
 };
 
-/// A signed limit order for submission to the CLOB exchange.
-///
-/// References: <https://docs.polymarket.com/#create-and-place-an-order>
+fn serialize_u64_as_str<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
+fn deserialize_u64_from_str_or_int<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<u64, D::Error> {
+    use serde::de::{Error, Visitor};
+    struct U64Visitor;
+    impl<'de> Visitor<'de> for U64Visitor {
+        type Value = u64;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "u64 as integer or string")
+        }
+        fn visit_u64<E: Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+        fn visit_str<E: Error>(self, v: &str) -> Result<u64, E> {
+            v.parse().map_err(E::custom)
+        }
+        fn visit_string<E: Error>(self, v: String) -> Result<u64, E> {
+            v.parse().map_err(E::custom)
+        }
+    }
+    d.deserialize_any(U64Visitor)
+}
+
+/// A signed limit order for submission to the CLOB exchange (v2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolymarketOrder {
     pub salt: u64,
     pub maker: String,
     pub signer: String,
-    pub taker: String,
     pub token_id: Ustr,
     #[serde(
         serialize_with = "serialize_decimal_as_str",
@@ -50,12 +75,13 @@ pub struct PolymarketOrder {
     )]
     pub taker_amount: Decimal,
     pub expiration: String,
-    pub nonce: String,
     #[serde(
-        serialize_with = "serialize_decimal_as_str",
-        deserialize_with = "deserialize_decimal_from_str"
+        serialize_with = "serialize_u64_as_str",
+        deserialize_with = "deserialize_u64_from_str_or_int"
     )]
-    pub fee_rate_bps: Decimal,
+    pub timestamp: u64,
+    pub metadata: B256,
+    pub builder: B256,
     pub side: PolymarketOrderSide,
     pub signature_type: SignatureType,
     pub signature: String,
@@ -294,15 +320,6 @@ pub struct TickSizeResponse {
     pub minimum_tick_size: f64,
 }
 
-/// Fee rate response from CLOB `GET /fee-rate`.
-///
-/// Returns the taker fee rate in basis points for a given token.
-#[derive(Clone, Debug, Deserialize)]
-pub struct FeeRateResponse {
-    /// Fee rate in basis points.
-    pub base_fee: Decimal,
-}
-
 /// A single price level from the CLOB order book.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ClobBookLevel {
@@ -347,6 +364,17 @@ pub struct DataApiPosition {
     /// Average entry price in USDC (e.g. `0.65`).
     #[serde(default)]
     pub avg_price: f64,
+}
+
+/// Response from CLOB `GET /clob-market-info`.
+///
+/// Returns combined market parameters replacing separate tick-size and fee-rate calls.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClobMarketInfo {
+    /// Minimum tick size.
+    pub mts: String,
+    /// Minimum order size.
+    pub mos: String,
 }
 
 #[cfg(test)]
@@ -430,12 +458,10 @@ mod tests {
 
         let first = &trade.maker_orders[0];
         assert_eq!(first.matched_amount, dec!(25.0000));
-        assert_eq!(first.fee_rate_bps, dec!(0));
         assert_eq!(first.price, dec!(0.5000));
         assert_eq!(first.outcome, PolymarketOutcome::yes());
 
         let second = &trade.maker_orders[1];
-        assert_eq!(second.fee_rate_bps, dec!(10));
         assert_eq!(second.matched_amount, dec!(5.0000));
     }
 
@@ -453,12 +479,12 @@ mod tests {
 
         assert_eq!(order.salt, 123456789);
         assert_eq!(order.maker, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-        assert_eq!(order.taker, "0x0000000000000000000000000000000000000000");
         assert_eq!(order.maker_amount, dec!(100000000));
         assert_eq!(order.taker_amount, dec!(50000000));
-        assert_eq!(order.fee_rate_bps, dec!(0));
         assert_eq!(order.expiration, "0");
-        assert_eq!(order.nonce, "0");
+        assert_eq!(order.timestamp, 1703875200000u64);
+        assert_eq!(order.metadata, alloy_primitives::B256::ZERO);
+        assert_eq!(order.builder, alloy_primitives::B256::ZERO);
         assert_eq!(order.side, PolymarketOrderSide::Buy);
         assert_eq!(order.signature_type, SignatureType::Eoa);
     }
@@ -476,11 +502,12 @@ mod tests {
         let order: PolymarketOrder = load("http_signed_order.json");
         let json = serde_json::to_string(&order).unwrap();
 
-        // Verify camelCase field names are present in serialized output
         assert!(json.contains("\"tokenId\""));
         assert!(json.contains("\"makerAmount\""));
         assert!(json.contains("\"takerAmount\""));
-        assert!(json.contains("\"feeRateBps\""));
+        assert!(json.contains("\"timestamp\""));
+        assert!(json.contains("\"metadata\""));
+        assert!(json.contains("\"builder\""));
         assert!(json.contains("\"signatureType\""));
     }
 
@@ -638,18 +665,6 @@ mod tests {
         let response: ClobBookResponse = serde_json::from_str(json).unwrap();
         assert!(response.bids.is_empty());
         assert!(response.asks.is_empty());
-    }
-
-    #[rstest]
-    fn test_fee_rate_response_zero() {
-        let response: FeeRateResponse = load("clob_fee_rate_response_zero.json");
-        assert_eq!(response.base_fee, dec!(0));
-    }
-
-    #[rstest]
-    fn test_fee_rate_response_nonzero() {
-        let response: FeeRateResponse = load("clob_fee_rate_response_nonzero.json");
-        assert_eq!(response.base_fee, dec!(150));
     }
 
     #[rstest]
