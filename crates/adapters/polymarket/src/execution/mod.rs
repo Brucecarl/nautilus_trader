@@ -1360,6 +1360,10 @@ fn process_cancel_result(
     emitter: &ExecutionEventEmitter,
     clock: &'static AtomicTime,
 ) {
+    if response.canceled.iter().any(|id| id == venue_order_id_str) {
+        emit_cancel_status_report(order, venue_order_id, emitter, clock);
+    }
+
     if let Some(reason_opt) = response.not_canceled.get(venue_order_id_str) {
         let reason = reason_opt.as_deref().unwrap_or("unknown reason");
         match CancelOutcome::classify(reason) {
@@ -1375,6 +1379,41 @@ fn process_cancel_result(
             }
         }
     }
+}
+fn emit_cancel_status_report(
+    order: &OrderAny,
+    venue_order_id: VenueOrderId,
+    emitter: &ExecutionEventEmitter,
+    clock: &'static AtomicTime,
+) {
+    let Some(account_id) = order.account_id() else {
+        log::warn!(
+            "Cannot emit cancel status report for {}: missing account_id",
+            order.client_order_id()
+        );
+        return;
+    };
+
+    let ts = clock.get_time_ns();
+    let mut report = OrderStatusReport::new(
+        account_id,
+        order.instrument_id(),
+        Some(order.client_order_id()),
+        venue_order_id,
+        order.order_side(),
+        order.order_type(),
+        order.time_in_force(),
+        OrderStatus::Canceled,
+        order.quantity(),
+        order.filled_qty(),
+        ts,
+        ts,
+        ts,
+        None,
+    );
+    report.price = order.price();
+
+    emitter.send_order_status_report(report);
 }
 
 #[allow(clippy::too_many_arguments)]
