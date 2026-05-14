@@ -23,10 +23,10 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    enums::{OrderSide, TimeInForce},
-    types::{Price, Quantity},
+    enums::{OrderSide, TimeInForce}, identifiers::ClientOrderId, types::{Price, Quantity}
 };
 use nautilus_network::retry::{RetryConfig, RetryManager};
 use rust_decimal::Decimal;
@@ -86,7 +86,9 @@ impl OrderSubmitter {
         neg_risk: bool,
         expire_time: Option<UnixNanos>,
         tick_decimals: u32,
+        cid:ClientOrderId
     ) -> anyhow::Result<OrderResponse> {
+        let mut st=Utc::now().timestamp_millis();
         let poly_order_type = PolymarketOrderType::try_from(time_in_force)
             .map_err(|e| anyhow::anyhow!("Unsupported time in force: {e}"))?;
         let poly_side = PolymarketOrderSide::try_from(side)
@@ -112,10 +114,12 @@ impl OrderSubmitter {
                 tick_decimals,
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        log::warn!("submit_limit_order:build_limit_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
+        st=Utc::now().timestamp_millis();
 
         let http_client = self.http_client.clone();
 
-        self.retry_manager
+        let res=self.retry_manager
             .execute_with_retry(
                 "submit_limit_order",
                 || {
@@ -131,7 +135,9 @@ impl OrderSubmitter {
                 Error::transport,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| anyhow::anyhow!("{e}"));
+        log::warn!("submit_limit_order:post_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
+        res
     }
 
     /// Fetches order book, calculates crossing price, builds and posts a market order.

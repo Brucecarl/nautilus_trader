@@ -448,6 +448,7 @@ impl PolymarketExecutionClient {
         let account_id = self.core.account_id;
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
+        let cid=order.client_order_id();
 
         self.spawn_task("submit_limit_order", async move {
             match submitter
@@ -461,6 +462,7 @@ impl PolymarketExecutionClient {
                     neg_risk,
                     expire_time,
                     tick_decimals,
+                    cid
                 )
                 .await
             {
