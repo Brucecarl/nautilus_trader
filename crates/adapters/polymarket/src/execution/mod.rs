@@ -528,10 +528,11 @@ impl PolymarketExecutionClient {
         let account_id = self.core.account_id;
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
+        let cid=order.client_order_id();
 
         self.spawn_task("submit_market_order", async move {
             match submitter
-                .submit_market_order(&token_id, side, amount, neg_risk, tick_decimals)
+                .submit_market_order(&token_id, side, amount, neg_risk, tick_decimals,cid)
                 .await
             {
                 Ok((response, expected_base_qty)) => {

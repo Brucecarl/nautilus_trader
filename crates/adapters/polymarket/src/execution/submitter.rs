@@ -153,7 +153,9 @@ impl OrderSubmitter {
         amount: Quantity,
         neg_risk: bool,
         tick_decimals: u32,
+        cid:ClientOrderId
     ) -> anyhow::Result<(OrderResponse, Decimal)> {
+        let mut st=Utc::now().timestamp_millis();
         let poly_side = PolymarketOrderSide::try_from(side)
             .map_err(|e| anyhow::anyhow!("Invalid order side: {e}"))?;
         let amount_dec = amount.as_decimal();
@@ -172,6 +174,9 @@ impl OrderSubmitter {
         let result = calculate_market_price(levels, amount_dec, poly_side)
             .map_err(|e| anyhow::anyhow!("Market price calculation failed: {e}"))?;
 
+        log::warn!("submit_market_order:get_book crossing_price:{cid},{}",Utc::now().timestamp_millis()-st);
+        st=Utc::now().timestamp_millis();
+        
         let poly_order = self
             .order_builder
             .build_market_order(
@@ -183,6 +188,8 @@ impl OrderSubmitter {
                 tick_decimals,
             )
             .map_err(|e| anyhow::anyhow!("Failed to build market order: {e}"))?;
+        log::warn!("submit_market_order:build_limit_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
+        st=Utc::now().timestamp_millis();
 
         let http_client = self.http_client.clone();
 
@@ -204,6 +211,7 @@ impl OrderSubmitter {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        log::warn!("submit_market_order:post_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
 
         Ok((response, result.expected_base_qty))
     }

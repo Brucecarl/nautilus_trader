@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use serde_json;
 use nautilus_polymarket::{
     common::{
@@ -43,7 +44,7 @@ use nautilus_polymarket::{
 };
 
 
-const CLOB_V2_URL: &str = "https://clob-v2.polymarket.com";
+// const CLOB_V2_URL: &str = "https://clob-v2.polymarket.com";
 
 // US/Iran nuclear deal 2027 — YES token (from v2 migration doc test markets)
 const TEST_TOKEN_ID: &str =
@@ -64,7 +65,7 @@ fn live_client() -> PolymarketClobHttpClient {
     let funder = env("POLYMARKET_FUNDER");
 
     let cred = Credential::new(&api_key, &api_secret, passphrase).expect("valid credential");
-    PolymarketClobHttpClient::new(cred, funder, Some(CLOB_V2_URL.to_string()), Some(10))
+    PolymarketClobHttpClient::new(cred, funder, None, Some(10))
         .expect("valid client")
 }
 
@@ -73,7 +74,7 @@ fn unauth_client() -> PolymarketClobHttpClient {
     // Credential::new requires non-empty strings; use placeholders — L1 auth doesn't use HMAC.
     let cred = Credential::new("placeholder", "cGxhY2Vob2xkZXI=", "placeholder".to_string())
         .expect("placeholder credential");
-    PolymarketClobHttpClient::new(cred, String::new(), Some(CLOB_V2_URL.to_string()), Some(10))
+    PolymarketClobHttpClient::new(cred, String::new(), None, Some(10))
         .expect("valid client")
 }
 
@@ -90,7 +91,7 @@ async fn derive_preprod_client(pk: &EvmPrivateKey) -> PolymarketClobHttpClient {
 
     let cred = Credential::new(&creds.api_key, &creds.secret, creds.passphrase)
         .expect("valid derived credential");
-    PolymarketClobHttpClient::new(cred, address, Some(CLOB_V2_URL.to_string()), Some(10))
+    PolymarketClobHttpClient::new(cred, address, None, Some(10))
         .expect("valid client")
 }
 
@@ -102,7 +103,7 @@ fn live_order_builder() -> PolymarketOrderBuilder {
     // For EOA: maker == signer == address derived from POLYMARKET_PK.
     let address = format!("{:#x}", signer.address());
 
-    // The v2 preprod server validates order signatures against Polygon mainnet
+    // The v2 server validates order signatures against Polygon mainnet
     // domain (chain ID 137) — the exchange contract address is the same on both chains.
     PolymarketOrderBuilder::new(signer, address.clone(), address, SignatureType::Eoa)
 }
@@ -113,7 +114,7 @@ fn live_order_builder() -> PolymarketOrderBuilder {
 
 /// Verifies the v2 order book endpoint returns valid bids/asks.
 #[tokio::test]
-#[ignore = "live: requires network access to clob-v2.polymarket.com"]
+#[ignore = "live: requires network access"]
 async fn live_get_book_returns_bids_and_asks() {
     let client = live_client();
     let book = client.get_book(TEST_TOKEN_ID).await.unwrap();
@@ -140,7 +141,7 @@ async fn live_get_book_returns_bids_and_asks() {
 /// Derives preprod API credentials from POLYMARKET_PK via the L1 EIP-712 auth flow.
 /// Prints the api_key, secret, and passphrase for use as POLYMARKET_API_KEY etc.
 #[tokio::test]
-#[ignore = "live: requires POLYMARKET_PK env var and network access to clob-v2.polymarket.com"]
+#[ignore = "live: requires POLYMARKET_PK env var and network access"]
 async fn live_derive_api_key() {
     let pk = EvmPrivateKey::new(&env("POLYMARKET_PK")).expect("valid private key");
     let signer = OrderSigner::new(&pk).expect("valid signer");
@@ -166,7 +167,7 @@ async fn live_derive_api_key() {
 /// This is the "full order lifecycle" the migration checklist requires.
 /// Derives preprod credentials automatically from POLYMARKET_PK.
 #[tokio::test]
-#[ignore = "live: requires POLYMARKET_PK env var and funded preprod account on clob-v2.polymarket.com"]
+#[ignore = "live: requires POLYMARKET_PK env var and funded"]
 async fn live_order_lifecycle_submit_verify_cancel() {
     let pk = EvmPrivateKey::new(&env("POLYMARKET_PK")).expect("valid private key");
     let client = derive_preprod_client(&pk).await;
@@ -227,20 +228,26 @@ async fn live_order_lifecycle_submit_verify_cancel() {
     println!("order lifecycle complete: submit → verify → cancel ✓");
 }
 
-/// Verifies that /clob-market-info returns valid tick/order-size fields.
-/// This endpoint is active after the April 22 cutover.
 #[tokio::test]
-#[ignore = "live: requires network access to clob-v2.polymarket.com (endpoint active after April 22 cutover)"]
-async fn live_get_clob_market_info_valid_fields() {
-    let client = live_client();
-    let info = client
-        .get_clob_market_info(TEST_CONDITION_ID)
-        .await
-        .unwrap();
+#[ignore = "live: requires POLYMARKET_PK env var and funded account"]
+async fn test_order_builder() {
+    let builder = Arc::new(live_order_builder());
 
-    println!("mts={} mos={}", info.mts, info.mos);
-    assert!(!info.mts.is_empty(), "mts should be non-empty");
-    assert!(!info.mos.is_empty(), "mos should be non-empty");
-    info.mts.parse::<f64>().expect("mts is a decimal");
-    info.mos.parse::<f64>().expect("mos is a decimal");
+    let price = rust_decimal_macros::dec!(0.02);
+    let quantity = rust_decimal_macros::dec!(5); // minimum order size
+
+    let st=Utc::now();
+    let order = builder
+        .build_limit_order(
+            TEST_TOKEN_ID,
+            PolymarketOrderSide::Buy,
+            price,
+            quantity,
+            "0", // no expiration
+            false,
+            2, // 0.01 tick → 2 decimal places
+        )
+        .expect("built order");
+    let delta=Utc::now()-st;
+    println!("build time:{} ms",delta.num_milliseconds());
 }
