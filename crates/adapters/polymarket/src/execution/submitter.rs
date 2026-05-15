@@ -33,13 +33,12 @@ use rust_decimal::Decimal;
 
 use super::{order_builder::PolymarketOrderBuilder, parse::calculate_market_price};
 use crate::{
-    common::enums::{PolymarketOrderSide, PolymarketOrderType},
-    http::{
+    common::enums::{PolymarketOrderSide, PolymarketOrderType}, execution::parse::MarketPriceResult, http::{
         clob::PolymarketClobHttpClient,
         error::Error,
         models::PolymarketOpenOrder,
         query::{CancelResponse, OrderResponse},
-    },
+    }
 };
 
 /// HTTP order submission and cancellation facade.
@@ -151,6 +150,7 @@ impl OrderSubmitter {
         token_id: &str,
         side: OrderSide,
         amount: Quantity,
+        protection_price: Option<Price>,
         neg_risk: bool,
         tick_decimals: u32,
         cid:ClientOrderId
@@ -160,23 +160,39 @@ impl OrderSubmitter {
             .map_err(|e| anyhow::anyhow!("Invalid order side: {e}"))?;
         let amount_dec = amount.as_decimal();
 
-        let book = self
-            .http_client
-            .get_book(token_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch order book: {e}"))?;
+        let result = if let Some(price) = protection_price {
+            let crossing_price = price.as_decimal();
+            if crossing_price.is_zero() {
+                anyhow::bail!("Market order protection_price must be positive");
+            }
+            let expected_base_qty = match poly_side {
+                PolymarketOrderSide::Buy => amount_dec / crossing_price,
+                PolymarketOrderSide::Sell => amount_dec,
+            };
+            MarketPriceResult {
+                crossing_price,
+                expected_base_qty,
+            }
+        } else {
+            let book = self
+                .http_client
+                .get_book(token_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch order book: {e}"))?;
 
-        let levels = match poly_side {
-            PolymarketOrderSide::Buy => &book.asks,
-            PolymarketOrderSide::Sell => &book.bids,
+            let levels = match poly_side {
+                PolymarketOrderSide::Buy => &book.asks,
+                PolymarketOrderSide::Sell => &book.bids,
+            };
+
+            let result = calculate_market_price(levels, amount_dec, poly_side)
+                .map_err(|e| anyhow::anyhow!("Market price calculation failed: {e}"))?;
+
+            log::warn!("submit_market_order:get_book crossing_price:{cid},{}",Utc::now().timestamp_millis()-st);
+            result
         };
-
-        let result = calculate_market_price(levels, amount_dec, poly_side)
-            .map_err(|e| anyhow::anyhow!("Market price calculation failed: {e}"))?;
-
-        log::warn!("submit_market_order:get_book crossing_price:{cid},{}",Utc::now().timestamp_millis()-st);
         st=Utc::now().timestamp_millis();
-        
+
         let poly_order = self
             .order_builder
             .build_market_order(

@@ -771,6 +771,20 @@ fn make_market_order(
     ))
 }
 
+fn make_market_order_with_protection_price(
+    client_order_id: &str,
+    instrument_id: InstrumentId,
+    side: OrderSide,
+    quote_quantity: bool,
+    protection_price: Price,
+) -> OrderAny {
+    let mut order = make_market_order(client_order_id, instrument_id, side, quote_quantity);
+    if let OrderAny::Market(ref mut market_order) = order {
+        market_order.protection_price = Some(protection_price);
+    }
+    order
+}
+
 #[rstest]
 #[tokio::test]
 async fn test_submit_market_order_buy_accepted() {
@@ -937,6 +951,62 @@ async fn test_submit_market_order_rejected_empty_book() {
         .unwrap()
         .unwrap();
     assert_order_event(event, "Rejected");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_submit_market_order_uses_protection_price_without_fetching_book() {
+    let state = TestServerState::default();
+    // Empty book would reject if the adapter fetched REST liquidity.
+    *state.book_response.lock().await = Some(json!({"bids": [], "asks": []}));
+    let addr = start_mock_server(state.clone()).await;
+    let (mut client, mut rx, cache) = create_test_execution_client(addr);
+    client.start().unwrap();
+
+    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
+    add_instrument_to_cache(&cache, instrument_id);
+
+    let order = make_market_order_with_protection_price(
+        "O-MKT-PROTECT",
+        instrument_id,
+        OrderSide::Buy,
+        true,
+        Price::from("0.50"),
+    );
+    cache
+        .borrow_mut()
+        .add_order(order.clone(), None, None, false)
+        .unwrap();
+    let cmd = make_submit_cmd(&order, instrument_id);
+
+    client.submit_order(&cmd).unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_order_event(event, "Submitted");
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let updated = assert_order_event(event, "Updated");
+
+    if let OrderEventAny::Updated(ref u) = updated {
+        assert_eq!(u.quantity, Quantity::from(20));
+        assert!(!u.is_quote_quantity);
+    } else {
+        panic!("Expected Updated event");
+    }
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_order_event(event, "Accepted");
+
+    assert_eq!(*state.last_path.lock().await, "/order");
 }
 
 fn assert_order_status_report(event: ExecutionEvent, expected_status: OrderStatus) {

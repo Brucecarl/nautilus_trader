@@ -516,6 +516,7 @@ impl PolymarketExecutionClient {
         let tick_decimals = instrument.price_precision() as u32;
         let side = order.order_side();
         let amount = order.quantity();
+        let protection_price = order.price();
         let is_quote_qty = order.is_quote_quantity();
 
         let submitter = self.submitter.clone();
@@ -532,7 +533,7 @@ impl PolymarketExecutionClient {
 
         self.spawn_task("submit_market_order", async move {
             match submitter
-                .submit_market_order(&token_id, side, amount, neg_risk, tick_decimals,cid)
+                .submit_market_order(&token_id, side, amount, protection_price, neg_risk, tick_decimals,cid)
                 .await
             {
                 Ok((response, expected_base_qty)) => {
@@ -568,7 +569,7 @@ impl PolymarketExecutionClient {
                             false,
                             order.venue_order_id(),
                             order.account_id(),
-                            order.price(),
+                            None,
                             None,
                             None,
                             false, // is_quote_quantity
