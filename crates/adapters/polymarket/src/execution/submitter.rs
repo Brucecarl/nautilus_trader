@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{OrderSide, TimeInForce}, identifiers::ClientOrderId, types::{Price, Quantity}
@@ -85,9 +85,11 @@ impl OrderSubmitter {
         neg_risk: bool,
         expire_time: Option<UnixNanos>,
         tick_decimals: u32,
-        cid:ClientOrderId
+        cid:ClientOrderId,
+        st:DateTime<Utc>,
     ) -> anyhow::Result<OrderResponse> {
-        let mut st=Utc::now().timestamp_millis();
+        log::warn!("submit_limit_order:start submit:{cid},{}",(Utc::now()-st).num_milliseconds());
+        let mut st=Utc::now();
         let poly_order_type = PolymarketOrderType::try_from(time_in_force)
             .map_err(|e| anyhow::anyhow!("Unsupported time in force: {e}"))?;
         let poly_side = PolymarketOrderSide::try_from(side)
@@ -113,8 +115,8 @@ impl OrderSubmitter {
                 tick_decimals,
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        log::warn!("submit_limit_order:build_limit_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
-        st=Utc::now().timestamp_millis();
+        log::warn!("submit_limit_order:build_limit_order finish:{cid},{}",(Utc::now()-st).num_milliseconds());
+        st=Utc::now();
 
         let http_client = self.http_client.clone();
 
@@ -135,7 +137,7 @@ impl OrderSubmitter {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"));
-        log::warn!("submit_limit_order:post_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
+        log::warn!("submit_limit_order:post_order finish:{cid},{}",(Utc::now()-st).num_milliseconds());
         res
     }
 
@@ -153,9 +155,11 @@ impl OrderSubmitter {
         protection_price: Option<Price>,
         neg_risk: bool,
         tick_decimals: u32,
-        cid:ClientOrderId
+        cid:ClientOrderId,
+        st:DateTime<Utc>,
     ) -> anyhow::Result<(OrderResponse, Decimal)> {
-        let mut st=Utc::now().timestamp_millis();
+        log::warn!("submit_market_order:start submit:{cid},{}",(Utc::now()-st).num_milliseconds());
+        let mut st=Utc::now();
         let poly_side = PolymarketOrderSide::try_from(side)
             .map_err(|e| anyhow::anyhow!("Invalid order side: {e}"))?;
         let amount_dec = amount.as_decimal();
@@ -188,10 +192,10 @@ impl OrderSubmitter {
             let result = calculate_market_price(levels, amount_dec, poly_side)
                 .map_err(|e| anyhow::anyhow!("Market price calculation failed: {e}"))?;
 
-            log::warn!("submit_market_order:get_book crossing_price:{cid},{}",Utc::now().timestamp_millis()-st);
+            log::warn!("submit_market_order:get_book crossing_price:{cid},{}",(Utc::now()-st).num_milliseconds());
             result
         };
-        st=Utc::now().timestamp_millis();
+        st=Utc::now();
 
         let poly_order = self
             .order_builder
@@ -204,8 +208,8 @@ impl OrderSubmitter {
                 tick_decimals,
             )
             .map_err(|e| anyhow::anyhow!("Failed to build market order: {e}"))?;
-        log::warn!("submit_market_order:build_limit_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
-        st=Utc::now().timestamp_millis();
+        log::warn!("submit_market_order:build_limit_order finish:{cid},{}",(Utc::now()-st).num_milliseconds());
+        st=Utc::now();
 
         let http_client = self.http_client.clone();
 
@@ -227,7 +231,7 @@ impl OrderSubmitter {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        log::warn!("submit_market_order:post_order finish:{cid},{}",Utc::now().timestamp_millis()-st);
+        log::warn!("submit_market_order:post_order finish:{cid},{}",(Utc::now()-st).num_milliseconds());
 
         Ok((response, result.expected_base_qty))
     }

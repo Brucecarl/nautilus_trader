@@ -30,6 +30,7 @@ use std::{
 use ahash::AHashSet;
 use anyhow::Context;
 use async_trait::async_trait;
+use chrono::Utc;
 use log::{debug, info};
 use nautilus_common::{
     cache::fifo::FifoCacheMap,
@@ -416,6 +417,7 @@ impl PolymarketExecutionClient {
     }
 
     fn submit_limit_order(&self, order: OrderAny) {
+        let mut st=Utc::now();
         if let Err(reason) = PolymarketOrderBuilder::validate_limit_order(&order) {
             self.emitter.emit_order_denied(&order, &reason);
             return;
@@ -449,6 +451,8 @@ impl PolymarketExecutionClient {
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
         let cid=order.client_order_id();
+        log::warn!("submit_limit_order:before submit:{cid},{}",(Utc::now()-st).num_milliseconds());
+        st=Utc::now();
 
         self.spawn_task("submit_limit_order", async move {
             match submitter
@@ -462,7 +466,8 @@ impl PolymarketExecutionClient {
                     neg_risk,
                     expire_time,
                     tick_decimals,
-                    cid
+                    cid,
+                    st
                 )
                 .await
             {
@@ -501,6 +506,7 @@ impl PolymarketExecutionClient {
     }
 
     fn submit_market_order(&self, order: OrderAny) {
+        let mut st=Utc::now();
         if let Err(reason) = PolymarketOrderBuilder::validate_market_order(&order) {
             self.emitter.emit_order_denied(&order, &reason);
             return;
@@ -530,10 +536,12 @@ impl PolymarketExecutionClient {
         let size_precision = instrument.size_precision();
         let price_precision = instrument.price_precision();
         let cid=order.client_order_id();
+        log::warn!("submit_market_order:before submit:{cid},{}",(Utc::now()-st).num_milliseconds());
+        st=Utc::now();
 
         self.spawn_task("submit_market_order", async move {
             match submitter
-                .submit_market_order(&token_id, side, amount, protection_price, neg_risk, tick_decimals,cid)
+                .submit_market_order(&token_id, side, amount, protection_price, neg_risk, tick_decimals,cid,st)
                 .await
             {
                 Ok((response, expected_base_qty)) => {
