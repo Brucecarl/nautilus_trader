@@ -525,6 +525,8 @@ impl PolymarketExecutionClient {
         let protection_price = order.price();
         let is_quote_qty = order.is_quote_quantity();
 
+        self.emitter.emit_order_submitted(&order);
+
         let submitter = self.submitter.clone();
         let emitter = self.emitter.clone();
         let clock = self.clock;
@@ -546,7 +548,7 @@ impl PolymarketExecutionClient {
             {
                 Ok((response, expected_base_qty)) => {
                     let mut order = order;
-                    emitter.emit_order_submitted(&order);
+                    // emitter.emit_order_submitted(&order);
 
                     // Convert quote quantity to base only after successful submission
                     if response.success
