@@ -142,9 +142,8 @@ pub enum PolymarketLiquiditySide {
     Clone, Copy, Debug, PartialEq, Eq, Hash, StrumDisplay, EnumString, Serialize, Deserialize,
 )]
 pub enum PolymarketOrderType {
-    FOK,
-    /// Immediate or cancel.
-    FAK,
+    FOK,//fill entirely or cancel the whole order
+    FAK,//fill what’s available, cancel the rest
     GTC,
     GTD,
 }

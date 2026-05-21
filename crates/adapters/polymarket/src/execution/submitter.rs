@@ -222,7 +222,7 @@ impl OrderSubmitter {
                     let poly_order = poly_order.clone();
                     async move {
                         http_client
-                            .post_order(&poly_order, PolymarketOrderType::FOK, false)
+                            .post_order(&poly_order, PolymarketOrderType::FAK, false)
                             .await
                     }
                 },
