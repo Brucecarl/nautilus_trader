@@ -317,6 +317,21 @@ impl Cache {
         Ok(())
     }
 
+    /// Loads an order by venue order ID from the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading from the database fails.
+    pub async fn load_order_by_venue_order_id(
+        &self,
+        venue_order_id: &VenueOrderId,
+    ) -> anyhow::Result<Option<OrderAny>> {
+        match &self.database {
+            Some(db) => db.load_order_by_venue_order_id(venue_order_id).await,
+            None => Ok(None),
+        }
+    }
+
     /// Clears and reloads the position cache from the database.
     ///
     /// # Errors

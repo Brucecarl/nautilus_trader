@@ -22,13 +22,16 @@ pub fn get_cache(cache_database: Option<Box<dyn CacheDatabaseAdapter>>) -> Cache
 
 #[cfg(test)]
 #[cfg(feature = "postgres")]
-#[cfg(target_os = "linux")] // Databases only tested and supported on Linux
+// #[cfg(target_os = "linux")] // Databases only tested and supported on Linux
 mod serial_tests {
     use std::time::Duration;
 
-    use nautilus_common::{cache::database::CacheDatabaseAdapter, testing::wait_until_async};
+    use nautilus_common::{cache::{Cache, database::CacheDatabaseAdapter}, testing::wait_until_async};
     use nautilus_core::{UUID4, UnixNanos};
-    use nautilus_infrastructure::sql::{cache::get_pg_cache_database, queries::DatabaseQueries};
+    use nautilus_infrastructure::sql::{
+        cache::{PostgresCacheDatabase, get_pg_cache_database},
+        queries::DatabaseQueries,
+    };
     use nautilus_model::{
         accounts::AccountAny,
         enums::{CurrencyType, OrderSide, OrderType},
@@ -129,6 +132,25 @@ mod serial_tests {
 
         database.flush().unwrap();
         database.close().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cache_load_order_by_venue_order_id_with_postgres_database() {
+        const DB_URL: &str = std::env!("DB_URL");
+
+        let mut cache = Cache::default();
+        cache.set_database(Box::new(
+            PostgresCacheDatabase::connect_url(DB_URL).await.unwrap(),
+        ));
+
+        let venue_order_id = VenueOrderId::new("0xe22761e15890bd6843733c6e63a21f38bef0342669578e3aa444fb962ed24712");
+        let loaded = cache
+            .load_order_by_venue_order_id(&venue_order_id)
+            .await
+            .unwrap()
+            .expect("order should load by venue_order_id");
+        println!("{:?}",loaded);
+        assert_eq!(loaded.venue_order_id(), Some(venue_order_id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -314,7 +336,8 @@ mod serial_tests {
         )
         .await;
 
-        let currencies = database.load_currencies().await.unwrap();
+        let currencies: ahash::AHashMap<Ustr, Currency> =
+            database.load_currencies().await.unwrap();
         assert!(
             currencies.contains_key(&eth_key),
             "Currency should be flushed immediately"

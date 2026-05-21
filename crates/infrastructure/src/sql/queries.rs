@@ -22,7 +22,7 @@ use nautilus_model::{
         AccountState, OrderEvent, OrderEventAny, OrderSnapshot,
         position::snapshot::PositionSnapshot,
     },
-    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, PositionId},
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     types::{AccountBalance, Currency, MarginBalance},
@@ -741,6 +741,37 @@ impl DatabaseQueries {
         .map_err(|e| anyhow::anyhow!("Failed to load order events: {e}"))
     }
 
+    pub async fn load_order_events_by_venue_order_id_without_external(
+        pool: &PgPool,
+        venue_order_id: &VenueOrderId,
+        dedup:bool
+    ) -> anyhow::Result<Vec<OrderEventAny>> {
+        sqlx::query_as::<_, OrderEventAnyModel>(r#"
+            SELECT *
+            FROM "order_event" event
+            WHERE event.client_order_id = (
+                SELECT client_order_id
+                FROM "order_event"
+                WHERE venue_order_id = $1 and strategy_id <> 'EXTERNAL'
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) and strategy_id <> 'EXTERNAL'
+            ORDER BY created_at ASC
+            "#)
+        .bind(venue_order_id.to_string())
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            if dedup{
+                let events = rows.into_iter().map(|row| row.0).collect();
+                filter_order_events_for_venue_order_id(events, venue_order_id)
+            }else{
+                rows.into_iter().map(|row| row.0).collect()
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to load order events by venue_order_id: {e}"))
+    }
+
     /// Loads and assembles a complete `OrderAny` for a `client_order_id` via the provided `pool`.
     ///
     /// # Errors
@@ -765,6 +796,29 @@ impl DatabaseQueries {
                 Ok(Some(order))
             }
             Err(e) => anyhow::bail!("Failed to load order events: {e}"),
+        }
+    }
+
+    /// Loads and assembles a complete `OrderAny` for a `venue_order_id` via the provided `pool`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading the client order ID or assembling events fails.
+    pub async fn load_order_by_venue_order_id(
+        pool: &PgPool,
+        venue_order_id: &VenueOrderId,
+    ) -> anyhow::Result<Option<OrderAny>> {
+        let order_events = Self::load_order_events_by_venue_order_id_without_external(pool, venue_order_id,true).await;
+
+        match order_events {
+            Ok(order_events) => {
+                if order_events.is_empty() {
+                    return Ok(None);
+                }
+                let order = OrderAny::from_events(order_events)?;
+                Ok(Some(order))
+            }
+            Err(e) => anyhow::bail!("Failed to load order events by venue_order_id: {e}"),
         }
     }
 
@@ -1302,5 +1356,89 @@ impl DatabaseQueries {
             results.push(custom);
         }
         Ok(results)
+    }
+}
+
+fn filter_order_events_for_venue_order_id(
+    events: Vec<OrderEventAny>,
+    venue_order_id: &VenueOrderId,
+) -> Vec<OrderEventAny> {
+    let mut lifecycles: Vec<Vec<OrderEventAny>> = Vec::new();
+
+    for event in events {
+        if matches!(event, OrderEventAny::Initialized(_)) {
+            lifecycles.push(Vec::new());
+        }
+
+        if let Some(current) = lifecycles.last_mut() {
+            current.push(event);
+        }
+    }
+
+    lifecycles
+        .into_iter()
+        .rev()
+        .find(|events| {
+            events
+                .iter()
+                .any(|event| event.venue_order_id() == Some(*venue_order_id))
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_model::{
+        enums::{OrderSide, OrderType},
+        events::OrderEventAny,
+        identifiers::{AccountId, ClientOrderId, VenueOrderId},
+        instruments::{Instrument, stubs::currency_pair_ethusdt},
+        orders::{
+            Order, OrderAny, builder::OrderTestBuilder, stubs::TestOrderEventStubs,
+        },
+        types::Quantity,
+    };
+
+    use super::filter_order_events_for_venue_order_id;
+
+    fn order_events_for_venue_order_id(
+        venue_order_id: VenueOrderId,
+    ) -> (OrderAny, Vec<OrderEventAny>) {
+        let instrument = currency_pair_ethusdt();
+        let mut order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(instrument.id())
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("1.0"))
+            .client_order_id(ClientOrderId::new("DUPLICATE-CLIENT-ID"))
+            .build();
+        let account_id = AccountId::from("SIM-001");
+
+        let initialized = order.init_event().clone();
+        let submitted = TestOrderEventStubs::submitted(&order, account_id);
+        order.apply(submitted.clone()).unwrap();
+        let accepted = TestOrderEventStubs::accepted(&order, account_id, venue_order_id);
+        order.apply(accepted.clone()).unwrap();
+
+        (
+            order,
+            vec![OrderEventAny::Initialized(initialized), submitted, accepted],
+        )
+    }
+
+    #[test]
+    fn test_filter_order_events_for_venue_order_id_returns_matching_lifecycle() {
+        let first_venue_order_id = VenueOrderId::from("V-FIRST");
+        let second_venue_order_id = VenueOrderId::from("V-SECOND");
+        let (_, mut first_events) = order_events_for_venue_order_id(first_venue_order_id);
+        let (second_order, second_events) = order_events_for_venue_order_id(second_venue_order_id);
+
+        first_events.extend(second_events);
+
+        let filtered =
+            filter_order_events_for_venue_order_id(first_events, &second_venue_order_id);
+        let loaded = OrderAny::from_events(filtered).unwrap();
+
+        assert_eq!(loaded.client_order_id(), second_order.client_order_id());
+        assert_eq!(loaded.venue_order_id(), Some(second_venue_order_id));
     }
 }

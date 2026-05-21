@@ -89,12 +89,13 @@ impl LiveExecEngineConfig {
     /// Configuration for live execution engines.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (reconciliation=None, reconciliation_startup_delay_secs=None, reconciliation_lookback_mins=None, reconciliation_instrument_ids=None, filter_unclaimed_external_orders=None, filter_position_reports=None, filtered_client_order_ids=None, generate_missing_orders=None, inflight_check_interval_ms=None, inflight_check_threshold_ms=None, inflight_check_retries=None, open_check_interval_secs=None, open_check_lookback_mins=None, open_check_threshold_ms=None, open_check_missing_retries=None, open_check_open_only=None, max_single_order_queries_per_cycle=None, single_order_query_delay_ms=None, position_check_interval_secs=None, position_check_lookback_mins=None, position_check_threshold_ms=None, position_check_retries=None, purge_closed_orders_interval_mins=None, purge_closed_orders_buffer_mins=None, purge_closed_positions_interval_mins=None, purge_closed_positions_buffer_mins=None, purge_account_events_interval_mins=None, purge_account_events_lookback_mins=None, purge_from_database=None, own_books_audit_interval_secs=None, graceful_shutdown_on_error=None, qsize=None))]
+    #[pyo3(signature = (reconciliation=None, reconciliation_startup_delay_secs=None, reconciliation_lookback_mins=None, reconciliation_instrument_ids=None, reconciliation_strategy_ids=None, filter_unclaimed_external_orders=None, filter_position_reports=None, filtered_client_order_ids=None, generate_missing_orders=None, inflight_check_interval_ms=None, inflight_check_threshold_ms=None, inflight_check_retries=None, open_check_interval_secs=None, open_check_lookback_mins=None, open_check_threshold_ms=None, open_check_missing_retries=None, open_check_open_only=None, max_single_order_queries_per_cycle=None, single_order_query_delay_ms=None, position_check_interval_secs=None, position_check_lookback_mins=None, position_check_threshold_ms=None, position_check_retries=None, purge_closed_orders_interval_mins=None, purge_closed_orders_buffer_mins=None, purge_closed_positions_interval_mins=None, purge_closed_positions_buffer_mins=None, purge_account_events_interval_mins=None, purge_account_events_lookback_mins=None, purge_from_database=None, own_books_audit_interval_secs=None, graceful_shutdown_on_error=None, qsize=None))]
     fn py_new(
         reconciliation: Option<bool>,
         reconciliation_startup_delay_secs: Option<f64>,
         reconciliation_lookback_mins: Option<u32>,
         reconciliation_instrument_ids: Option<Vec<String>>,
+        reconciliation_strategy_ids: Option<Vec<String>>,
         filter_unclaimed_external_orders: Option<bool>,
         filter_position_reports: Option<bool>,
         filtered_client_order_ids: Option<Vec<String>>,
@@ -131,6 +132,7 @@ impl LiveExecEngineConfig {
                 .unwrap_or(default.reconciliation_startup_delay_secs),
             reconciliation_lookback_mins,
             reconciliation_instrument_ids,
+            reconciliation_strategy_ids,
             filter_unclaimed_external_orders: filter_unclaimed_external_orders
                 .unwrap_or(default.filter_unclaimed_external_orders),
             filter_position_reports: filter_position_reports
@@ -182,6 +184,11 @@ impl LiveExecEngineConfig {
 
     fn __str__(&self) -> String {
         format!("{self:?}")
+    }
+
+    #[getter]
+    fn reconciliation_strategy_ids(&self) -> Option<Vec<String>> {
+        self.reconciliation_strategy_ids.clone()
     }
 }
 

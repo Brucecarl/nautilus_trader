@@ -201,6 +201,16 @@ pub trait CacheDatabaseAdapter {
     async fn load_order(&self, client_order_id: &ClientOrderId)
     -> anyhow::Result<Option<OrderAny>>;
 
+    /// Loads a single order by venue order ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading a single order fails.
+    async fn load_order_by_venue_order_id(
+        &self,
+        venue_order_id: &VenueOrderId,
+    ) -> anyhow::Result<Option<OrderAny>>;
+
     /// Loads a single position by position ID.
     ///
     /// # Errors

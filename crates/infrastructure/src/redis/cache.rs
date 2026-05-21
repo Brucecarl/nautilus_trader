@@ -1148,6 +1148,14 @@ impl CacheDatabaseAdapter for RedisCacheDatabaseAdapter {
         .await
     }
 
+    async fn load_order_by_venue_order_id(
+        &self,
+        venue_order_id: &VenueOrderId,
+    ) -> anyhow::Result<Option<OrderAny>> {
+        let _ = venue_order_id;
+        Ok(None)
+    }
+
     async fn load_position(&self, position_id: &PositionId) -> anyhow::Result<Option<Position>> {
         DatabaseQueries::load_position(
             &self.database.con,

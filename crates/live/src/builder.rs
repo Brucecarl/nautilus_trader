@@ -146,6 +146,10 @@ impl LiveNodeBuilder {
         self.config.exec_engine.reconciliation_lookback_mins = Some(mins);
         self
     }
+    pub fn with_reconciliation_strategy_ids(mut self, strategy_ids:Vec<String>) -> Self {
+        self.config.exec_engine.reconciliation_strategy_ids = Some(strategy_ids);
+        self
+    }
 
     /// Set the open order check interval in seconds for continuous reconciliation.
     /// Set to `None` to disable (default).

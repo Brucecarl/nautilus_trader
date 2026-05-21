@@ -597,6 +597,13 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
         Ok(rx.recv()?)
     }
 
+    async fn load_order_by_venue_order_id(
+        &self,
+        venue_order_id: &VenueOrderId,
+    ) -> anyhow::Result<Option<OrderAny>> {
+        DatabaseQueries::load_order_by_venue_order_id(&self.pool, venue_order_id).await
+    }
+
     async fn load_position(&self, position_id: &PositionId) -> anyhow::Result<Option<Position>> {
         todo!()
     }

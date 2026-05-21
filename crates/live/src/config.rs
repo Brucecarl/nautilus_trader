@@ -105,6 +105,8 @@ pub struct LiveExecEngineConfig {
     pub reconciliation_lookback_mins: Option<u32>,
     /// Specific instrument IDs to reconcile (if None, reconciles all).
     pub reconciliation_instrument_ids: Option<Vec<String>>,
+    /// Strategy IDs allowed to recover reconciled external order ownership from the database.
+    pub reconciliation_strategy_ids: Option<Vec<String>>,
     /// If unclaimed order events with an EXTERNAL strategy ID should be filtered/dropped.
     pub filter_unclaimed_external_orders: bool,
     /// If position status reports are filtered from reconciliation.
@@ -170,6 +172,7 @@ impl Default for LiveExecEngineConfig {
             reconciliation_startup_delay_secs: 10.0,
             reconciliation_lookback_mins: None,
             reconciliation_instrument_ids: None,
+            reconciliation_strategy_ids: None,
             filter_unclaimed_external_orders: false,
             filter_position_reports: false,
             filtered_client_order_ids: None,
@@ -509,6 +512,7 @@ mod tests {
         assert_eq!(config.reconciliation_startup_delay_secs, 10.0);
         assert_eq!(config.reconciliation_lookback_mins, None);
         assert_eq!(config.reconciliation_instrument_ids, None);
+        assert_eq!(config.reconciliation_strategy_ids, None);
         assert_eq!(config.filtered_client_order_ids, None);
         assert!(!config.filter_unclaimed_external_orders);
         assert!(!config.filter_position_reports);
