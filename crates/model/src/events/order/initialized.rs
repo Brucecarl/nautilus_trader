@@ -520,6 +520,10 @@ impl OrderEvent for OrderInitialized {
         self.exec_spawn_id
     }
 
+    fn tags(&self) -> Option<&[Ustr]> {
+        self.tags.as_deref()
+    }
+
     fn venue_order_id(&self) -> Option<VenueOrderId> {
         None
     }

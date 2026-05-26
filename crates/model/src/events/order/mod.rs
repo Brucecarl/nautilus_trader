@@ -110,6 +110,9 @@ pub trait OrderEvent: 'static + Send {
     fn parent_order_id(&self) -> Option<ClientOrderId>;
     fn exec_algorithm_id(&self) -> Option<ExecAlgorithmId>;
     fn exec_spawn_id(&self) -> Option<ClientOrderId>;
+    fn tags(&self) -> Option<&[Ustr]> {
+        None
+    }
     fn venue_order_id(&self) -> Option<VenueOrderId>;
     fn account_id(&self) -> Option<AccountId>;
     fn position_id(&self) -> Option<PositionId>;

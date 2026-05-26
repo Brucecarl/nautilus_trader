@@ -655,11 +655,11 @@ impl DatabaseQueries {
                 post_only, reduce_only, quote_quantity, reconciliation, price, last_px, last_qty, trigger_price, trigger_type, limit_offset, trailing_offset,
                 trailing_offset_type, expire_time, display_qty, emulation_trigger, trigger_instrument_id, contingency_type,
                 order_list_id, linked_order_ids, parent_order_id,
-                exec_algorithm_id, exec_spawn_id, venue_order_id, account_id, position_id, commission, ts_event, ts_init, created_at, updated_at
+                exec_algorithm_id, exec_spawn_id, venue_order_id, account_id, position_id, commission, tags, ts_event, ts_init, created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
                 $21, $22, $23, $24, $25, $26::trailing_offset_type, $27, $28, $29, $30, $31, $32, $33, $34,
-                $35, $36, $37, $38, $39, $40, $41, $42, $43, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
             ON CONFLICT (id)
             DO UPDATE
@@ -668,7 +668,7 @@ impl DatabaseQueries {
                 quantity = $13, time_in_force = $14, liquidity_side = $15, post_only = $16, reduce_only = $17, quote_quantity = $18, reconciliation = $19, price = $20, last_px = $21,
                 last_qty = $22, trigger_price = $23, trigger_type = $24, limit_offset = $25, trailing_offset = $26, trailing_offset_type = $27, expire_time = $28, display_qty = $29,
                 emulation_trigger = $30, trigger_instrument_id = $31, contingency_type = $32, order_list_id = $33, linked_order_ids = $34, parent_order_id = $35, exec_algorithm_id = $36,
-                exec_spawn_id = $37, venue_order_id = $38, account_id = $39, position_id = $40, commission = $41, ts_event = $42, ts_init = $43, updated_at = CURRENT_TIMESTAMP
+                exec_spawn_id = $37, venue_order_id = $38, account_id = $39, position_id = $40, commission = $41, tags = $42, ts_event = $43, ts_init = $44, updated_at = CURRENT_TIMESTAMP
 
         "#)
             .bind(order_event.id().to_string())
@@ -712,6 +712,7 @@ impl DatabaseQueries {
             .bind(order_event.account_id().map(|x| x.to_string()))
             .bind(order_event.position_id().map(|x| x.to_string()))
             .bind(order_event.commission().map(|x| x.to_string()))
+            .bind(order_event.tags().map(|x| x.iter().map(ToString::to_string).collect::<Vec<String>>()))
             .bind(order_event.ts_event().to_string())
             .bind(order_event.ts_init().to_string())
             .execute(&mut *transaction)
