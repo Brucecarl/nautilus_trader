@@ -400,7 +400,7 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     async fn load_synthetics(&self) -> anyhow::Result<AHashMap<InstrumentId, SyntheticInstrument>> {
-        todo!()
+        Ok(AHashMap::new())
     }
 
     async fn load_accounts(&self) -> anyhow::Result<AHashMap<AccountId, AccountAny>> {
@@ -460,11 +460,11 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     async fn load_positions(&self) -> anyhow::Result<AHashMap<PositionId, Position>> {
-        todo!()
+        Ok(AHashMap::new())
     }
 
     fn load_index_order_position(&self) -> anyhow::Result<AHashMap<ClientOrderId, Position>> {
-        todo!()
+        Ok(AHashMap::new())
     }
 
     fn load_index_order_client(&self) -> anyhow::Result<AHashMap<ClientOrderId, ClientId>> {

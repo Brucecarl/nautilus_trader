@@ -665,6 +665,19 @@ impl LiveNodeBuilderPy {
         }
     }
 
+    #[pyo3(name = "with_load_cache")]
+    fn py_with_load_cache(&self, load_cache: bool) -> PyResult<Self> {
+        let mut inner_ref = self.inner.borrow_mut();
+        if let Some(builder) = inner_ref.take() {
+            *inner_ref = Some(builder.with_load_cache(load_cache));
+            Ok(Self {
+                inner: self.inner.clone(),
+            })
+        } else {
+            Err(to_pyruntime_err("Builder already consumed"))
+        }
+    }
+
     #[pyo3(name = "with_timeout_connection")]
     fn py_with_timeout_connection(&self, timeout_secs: u64) -> PyResult<Self> {
         let mut inner_ref = self.inner.borrow_mut();

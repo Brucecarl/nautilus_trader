@@ -779,9 +779,6 @@ impl DatabaseQueries {
     ///
     /// Returns an error if assembling events or SQL operations fail.
     ///
-    /// # Panics
-    ///
-    /// Panics if assembling the order from events fails.
     pub async fn load_order(
         pool: &PgPool,
         client_order_id: &ClientOrderId,
@@ -793,7 +790,8 @@ impl DatabaseQueries {
                 if order_events.is_empty() {
                     return Ok(None);
                 }
-                let order = OrderAny::from_events(order_events).unwrap();
+                let order_events = filter_order_events_for_latest_lifecycle(order_events);
+                let order = OrderAny::from_events(order_events)?;
                 Ok(Some(order))
             }
             Err(e) => anyhow::bail!("Failed to load order events: {e}"),
@@ -829,9 +827,6 @@ impl DatabaseQueries {
     ///
     /// Returns an error if loading events or SQL operations fail.
     ///
-    /// # Panics
-    ///
-    /// Panics if loading or assembling any individual order fails.
     pub async fn load_orders(pool: &PgPool) -> anyhow::Result<Vec<OrderAny>> {
         let mut orders: Vec<OrderAny> = Vec::new();
         let client_order_ids: Vec<ClientOrderId> = sqlx::query(
@@ -848,7 +843,7 @@ impl DatabaseQueries {
         })
         .map_err(|e| anyhow::anyhow!("Failed to load order ids: {e}"))?;
         for id in client_order_ids {
-            let order = Self::load_order(pool, &id).await.unwrap();
+            let order = Self::load_order(pool, &id).await?;
             if let Some(order) = order {
                 orders.push(order);
             }
@@ -1387,6 +1382,22 @@ fn filter_order_events_for_venue_order_id(
         .unwrap_or_default()
 }
 
+fn filter_order_events_for_latest_lifecycle(events: Vec<OrderEventAny>) -> Vec<OrderEventAny> {
+    let mut lifecycles: Vec<Vec<OrderEventAny>> = Vec::new();
+
+    for event in events {
+        if matches!(event, OrderEventAny::Initialized(_)) {
+            lifecycles.push(Vec::new());
+        }
+
+        if let Some(current) = lifecycles.last_mut() {
+            current.push(event);
+        }
+    }
+
+    lifecycles.pop().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
@@ -1400,7 +1411,7 @@ mod tests {
         types::Quantity,
     };
 
-    use super::filter_order_events_for_venue_order_id;
+    use super::{filter_order_events_for_latest_lifecycle, filter_order_events_for_venue_order_id};
 
     fn order_events_for_venue_order_id(
         venue_order_id: VenueOrderId,
@@ -1437,6 +1448,22 @@ mod tests {
 
         let filtered =
             filter_order_events_for_venue_order_id(first_events, &second_venue_order_id);
+        let loaded = OrderAny::from_events(filtered).unwrap();
+
+        assert_eq!(loaded.client_order_id(), second_order.client_order_id());
+        assert_eq!(loaded.venue_order_id(), Some(second_venue_order_id));
+    }
+
+    #[test]
+    fn test_filter_order_events_for_latest_lifecycle_returns_last_lifecycle() {
+        let first_venue_order_id = VenueOrderId::from("V-FIRST");
+        let second_venue_order_id = VenueOrderId::from("V-SECOND");
+        let (_, mut first_events) = order_events_for_venue_order_id(first_venue_order_id);
+        let (second_order, second_events) = order_events_for_venue_order_id(second_venue_order_id);
+
+        first_events.extend(second_events);
+
+        let filtered = filter_order_events_for_latest_lifecycle(first_events);
         let loaded = OrderAny::from_events(filtered).unwrap();
 
         assert_eq!(loaded.client_order_id(), second_order.client_order_id());

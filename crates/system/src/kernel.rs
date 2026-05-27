@@ -402,8 +402,28 @@ impl NautilusKernel {
     }
 
     /// Starts the Nautilus system kernel asynchronously.
-    pub async fn start_async(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading the execution cache fails.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn start_async(&mut self) -> anyhow::Result<()> {
+        let flush_on_start = self
+            .config
+            .cache()
+            .as_ref()
+            .is_some_and(|cache| cache.flush_on_start);
+        let load_cache = self
+            .config
+            .exec_engine()
+            .is_some_and(|config| config.load_cache);
+
+        if load_cache && !flush_on_start {
+            self.exec_engine.borrow_mut().load_cache().await?;
+        }
+
         self.start();
+        Ok(())
     }
 
     /// Starts the trader (strategies and actors).

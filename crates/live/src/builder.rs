@@ -119,6 +119,13 @@ impl LiveNodeBuilder {
         self
     }
 
+    /// Configure whether to load the cache on startup.
+    #[must_use]
+    pub const fn with_load_cache(mut self, load_cache: bool) -> Self {
+        self.config.exec_engine.load_cache = load_cache;
+        self
+    }
+
     /// Set the connection timeout in seconds.
     #[must_use]
     pub const fn with_timeout_connection(mut self, timeout_secs: u64) -> Self {

@@ -309,7 +309,7 @@ impl LiveNode {
 
         self.handle.set_state(NodeState::Starting);
 
-        self.kernel.start_async().await;
+        self.kernel.start_async().await?;
         self.kernel.connect_clients().await;
 
         if !self.await_engines_connected().await {
@@ -615,7 +615,7 @@ impl LiveNode {
         log::info!("Event loop starting");
 
         self.handle.set_state(NodeState::Starting);
-        self.kernel.start_async().await;
+        self.kernel.start_async().await?;
 
         let stop_handle = self.handle.clone();
         let mut pending = PendingEvents::default();

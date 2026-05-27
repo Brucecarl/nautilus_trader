@@ -421,7 +421,7 @@ impl ExecutionManager {
             }
 
             if let Some(client_order_id) = &report.client_order_id {
-                if let Some(cached_order) = self.get_order(client_order_id)
+                if let Some(cached_order) = self.get_order(client_order_id)//TODO:ExecutionEngine.load_cache should be called in startup
                     && self.is_exact_order_match(&cached_order, report)
                 {
                     log::debug!("Skipping order {client_order_id}: already in sync with venue");
@@ -494,8 +494,7 @@ impl ExecutionManager {
                     ) {
                         log::warn!("Failed to add venue order ID index: {e}");
                     }
-                } else if let Some(order) = self.get_order_by_venue_order_id(&report.venue_order_id)
-                {
+                } else if let Some(order) = self.get_order_by_venue_order_id(&report.venue_order_id){
                     // Fallback: match by venue_order_id
                     let instrument = self.get_instrument(&report.instrument_id);
 
@@ -2201,6 +2200,23 @@ impl ExecutionManager {
         }
 
         events
+    }
+
+    async fn load_order_from_db(&self,venue_order_id: &VenueOrderId)->Option<OrderAny>{
+        match self
+            .cache
+            .borrow()
+            .load_order_by_venue_order_id(venue_order_id)
+            .await
+        {
+            Ok(order) => order,
+            Err(e) => {
+                log::warn!(
+                    "Failed to load reconciled order from database for venue_order_id={venue_order_id}: {e}"
+                );
+                return None;
+            }
+        }
     }
 
     async fn load_reconciliation_strategy_from_db(

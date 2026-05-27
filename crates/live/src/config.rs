@@ -23,7 +23,7 @@ use nautilus_common::{
     logging::{logger::LoggerConfig, writer::FileWriterConfig},
     msgbus::database::MessageBusConfig,
 };
-use nautilus_core::UUID4;
+use nautilus_core::{UUID4, serialization::default_true};
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::identifiers::TraderId;
@@ -97,6 +97,9 @@ impl From<LiveRiskEngineConfig> for RiskEngineConfig {
 )]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveExecEngineConfig {
+    /// If the cache should be loaded on initialization.
+    #[serde(default = "default_true")]
+    pub load_cache: bool,
     /// If reconciliation is active at start-up.
     pub reconciliation: bool,
     /// The delay (seconds) before starting reconciliation at startup.
@@ -168,6 +171,7 @@ pub struct LiveExecEngineConfig {
 impl Default for LiveExecEngineConfig {
     fn default() -> Self {
         Self {
+            load_cache: false,
             reconciliation: true,
             reconciliation_startup_delay_secs: 10.0,
             reconciliation_lookback_mins: None,
@@ -208,6 +212,7 @@ impl Default for LiveExecEngineConfig {
 impl From<LiveExecEngineConfig> for ExecutionEngineConfig {
     fn from(config: LiveExecEngineConfig) -> Self {
         Self {
+            load_cache: config.load_cache,
             purge_closed_orders_interval_mins: config.purge_closed_orders_interval_mins,
             purge_closed_orders_buffer_mins: config.purge_closed_orders_buffer_mins,
             purge_closed_positions_interval_mins: config.purge_closed_positions_interval_mins,
@@ -485,6 +490,7 @@ mod tests {
         assert_eq!(config.data_engine.qsize, 100_000);
         assert_eq!(config.risk_engine.qsize, 100_000);
         assert_eq!(config.exec_engine.qsize, 100_000);
+        assert!(config.exec_engine.load_cache);
         assert!(config.exec_engine.reconciliation);
         assert!(!config.exec_engine.filter_unclaimed_external_orders);
         assert!(config.data_clients.is_empty());
@@ -508,6 +514,7 @@ mod tests {
     fn test_live_exec_engine_config_defaults() {
         let config = LiveExecEngineConfig::default();
 
+        assert!(config.load_cache);
         assert!(config.reconciliation);
         assert_eq!(config.reconciliation_startup_delay_secs, 10.0);
         assert_eq!(config.reconciliation_lookback_mins, None);
@@ -529,6 +536,18 @@ mod tests {
         assert!(!config.graceful_shutdown_on_error);
         assert_eq!(config.qsize, 100_000);
         assert_eq!(config.reconciliation_startup_delay_secs, 10.0);
+    }
+
+    #[rstest]
+    fn test_live_exec_engine_config_into_execution_engine_config_preserves_load_cache() {
+        let config = LiveExecEngineConfig {
+            load_cache: false,
+            ..Default::default()
+        };
+
+        let exec_config = ExecutionEngineConfig::from(config);
+
+        assert!(!exec_config.load_cache);
     }
 
     #[rstest]
