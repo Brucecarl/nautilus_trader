@@ -24,6 +24,7 @@ use nautilus_common::{
 };
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
+    accounts::AccountAny,
     enums::{AccountType, OmsType},
     identifiers::ClientId,
 };
@@ -170,6 +171,7 @@ impl ExecutionClientFactory for PolymarketExecutionClientFactory {
 
         let oms_type = OmsType::Netting;
         let account_type = AccountType::Cash;
+        AccountAny::register_calculated_account(POLYMARKET_VENUE.as_str())?;
 
         let client_id = ClientId::from(name);
         let core = ExecutionClientCore::new(

@@ -1711,7 +1711,6 @@ fn update_order(
     _config: PortfolioConfig,
     event: &OrderEventAny,
 ) {
-    let cache_ref = cache.borrow();
     let account_id = match event.account_id() {
         Some(account_id) => account_id,
         None => {
@@ -1719,14 +1718,18 @@ fn update_order(
         }
     };
 
-    let account = if let Some(account) = cache_ref.account(&account_id) {
-        account
-    } else {
-        log::error!("Cannot update order: no account registered for {account_id}");
-        return;
+    let account = {
+        let cache_ref = cache.borrow();
+
+        if let Some(account) = cache_ref.account(&account_id) {
+            account.clone()
+        } else {
+            log::error!("Cannot update order: no account registered for {account_id}");
+            return;
+        }
     };
 
-    match account {
+    match &account {
         AccountAny::Cash(cash_account) => {
             if !cash_account.base.calculate_account_state {
                 return;
@@ -1750,36 +1753,47 @@ fn update_order(
         }
     }
 
-    let cache_ref = cache.borrow();
-    let order = if let Some(order) = cache_ref.order(&event.client_order_id()) {
-        order
-    } else {
-        log::error!(
-            "Cannot update order: {} not found in the cache",
-            event.client_order_id()
-        );
-        return; // No Order Found
+    let (order, instrument, orders_open) = {
+        let cache_ref = cache.borrow();
+
+        let order = if let Some(order) = cache_ref.order(&event.client_order_id()) {
+            order.clone()
+        } else {
+            log::error!(
+                "Cannot update order: {} not found in the cache",
+                event.client_order_id()
+            );
+            return; // No Order Found
+        };
+
+        let instrument = if let Some(instrument_id) = cache_ref.instrument(&event.instrument_id()) {
+            instrument_id.clone()
+        } else {
+            log::error!(
+                "Cannot update order: no instrument found for {}",
+                event.instrument_id()
+            );
+            return;
+        };
+
+        let orders_open = cache_ref
+            .orders_open(None, Some(&event.instrument_id()), None, None, None)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        (order, instrument, orders_open)
     };
 
     if matches!(event, OrderEventAny::Rejected(_)) && order.order_type() != OrderType::StopLimit {
         return; // No change to account state
     }
 
-    let instrument = if let Some(instrument_id) = cache_ref.instrument(&event.instrument_id()) {
-        instrument_id
-    } else {
-        log::error!(
-            "Cannot update order: no instrument found for {}",
-            event.instrument_id()
-        );
-        return;
-    };
-
     if let OrderEventAny::Filled(order_filled) = event {
         let _ = inner
             .borrow()
             .accounts
-            .update_balances(account.clone(), instrument, *order_filled);
+            .update_balances(account.clone(), &instrument, *order_filled);
 
         let portfolio_clone = Portfolio {
             clock: clock.clone(),
@@ -1804,19 +1818,17 @@ fn update_order(
         }
     }
 
-    let orders_open = cache_ref.orders_open(None, Some(&event.instrument_id()), None, None, None);
+    let orders_open_refs = orders_open.iter().collect::<Vec<_>>();
 
     let account_state = inner.borrow_mut().accounts.update_orders(
-        account,
-        instrument,
-        orders_open,
+        &account,
+        &instrument,
+        orders_open_refs,
         clock.borrow().timestamp_ns(),
     );
 
-    let mut cache_ref = cache.borrow_mut();
-
     if let Some((updated_account, account_state)) = account_state {
-        cache_ref.update_account(&updated_account).unwrap();
+        cache.borrow_mut().update_account(&updated_account).unwrap();
         msgbus::publish_account_state(
             format!("events.account.{}", account.id()).into(),
             &account_state,

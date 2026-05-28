@@ -19,7 +19,9 @@
 //! single collection (e.g. `Vec<AccountAny>`).  Each variant simply embeds one of the concrete
 //! account structs defined in this module.
 
-use ahash::AHashMap;
+use std::sync::{LazyLock, Mutex};
+
+use ahash::{AHashMap, AHashSet};
 use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 
@@ -33,11 +35,55 @@ use crate::{
     types::{AccountBalance, Currency, Money, Price, Quantity},
 };
 
+static CALCULATED_ACCOUNT_ISSUERS: LazyLock<Mutex<AHashSet<String>>> =
+    LazyLock::new(|| Mutex::new(AHashSet::new()));
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[enum_dispatch(Account)]
 pub enum AccountAny {
     Margin(MarginAccount),
     Cash(CashAccount),
+}
+
+impl AccountAny {
+    /// Registers account state for the given issuer to be calculated from order events.
+    ///
+    /// This mirrors the Python `AccountFactory.register_calculated_account` behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the calculated account issuer registry lock is poisoned.
+    pub fn register_calculated_account(issuer: &str) -> anyhow::Result<()> {
+        CALCULATED_ACCOUNT_ISSUERS
+            .lock()
+            .map_err(|e| {
+                anyhow::anyhow!("Error acquiring lock on calculated account issuers: {e}")
+            })?
+            .insert(issuer.to_string());
+        Ok(())
+    }
+
+    /// Creates an `AccountAny` from an `AccountState`, returning an error for unsupported types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the account type is `Betting` or `Wallet` (unsupported in Rust).
+    pub fn try_from_state(event: AccountState) -> Result<Self, &'static str> {
+        let issuer = event.account_id.get_issuer();
+        let calculated = CALCULATED_ACCOUNT_ISSUERS
+            .lock()
+            .expect("calculated account issuer registry poisoned")
+            .contains(issuer.as_str());
+
+        match event.account_type {
+            AccountType::Margin => Ok(Self::Margin(MarginAccount::new(event, calculated))),
+            AccountType::Cash => Ok(Self::Cash(CashAccount::new(event, calculated, false))),
+            AccountType::Betting => Err(
+                "Betting accounts are not yet supported in Rust, use Python for betting workflows",
+            ),
+            AccountType::Wallet => Err("Wallet accounts are not yet implemented in Rust"),
+        }
+    }
 }
 
 impl AccountAny {
@@ -166,23 +212,6 @@ impl AccountAny {
     }
 }
 
-impl AccountAny {
-    /// Creates an `AccountAny` from an `AccountState`, returning an error for unsupported types.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the account type is `Betting` or `Wallet` (unsupported in Rust).
-    pub fn try_from_state(event: AccountState) -> Result<Self, &'static str> {
-        match event.account_type {
-            AccountType::Margin => Ok(Self::Margin(MarginAccount::new(event, false))),
-            AccountType::Cash => Ok(Self::Cash(CashAccount::new(event, false, false))),
-            AccountType::Betting => Err("Betting accounts are not yet supported in Rust, \
-                use Python for betting workflows"),
-            AccountType::Wallet => Err("Wallet accounts are not yet implemented in Rust"),
-        }
-    }
-}
-
 impl From<AccountState> for AccountAny {
     /// Creates an `AccountAny` from an `AccountState`.
     ///
@@ -239,6 +268,30 @@ mod tests {
         let result = AccountAny::try_from_state(cash_account_state);
         assert!(result.is_ok());
         assert!(matches!(result.unwrap(), AccountAny::Cash(_)));
+    }
+
+    #[rstest]
+    fn test_try_from_state_registered_calculated_cash_account() {
+        AccountAny::register_calculated_account("CALCULATED").unwrap();
+
+        let state = AccountState::new(
+            AccountId::from("CALCULATED-001"),
+            AccountType::Cash,
+            vec![],
+            vec![],
+            false,
+            UUID4::new(),
+            Default::default(),
+            Default::default(),
+            None,
+        );
+
+        let result = AccountAny::try_from_state(state);
+        assert!(result.is_ok());
+        let AccountAny::Cash(account) = result.unwrap() else {
+            panic!("expected cash account");
+        };
+        assert!(account.base.calculate_account_state);
     }
 
     #[rstest]
