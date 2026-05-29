@@ -42,7 +42,7 @@ use nautilus_core::{
     time::{AtomicTime, get_atomic_clock_realtime},
 };
 use nautilus_model::{
-    data::{Data as NautilusData, InstrumentStatus, OrderBookDeltas_API, QuoteTick},
+    data::{Data as NautilusData, InstrumentStatus, OrderBookDeltas_API, QuoteTick, bet},
     enums::{BookType, MarketStatusAction},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
@@ -347,6 +347,9 @@ impl PolymarketDataClient {
                                     "Failed to apply book snapshot for {instrument_id}: {e}"
                                 );
                             }
+                            let best_bid_price=book.best_bid_price().unwrap_or_default().as_f64();
+                            let best_ask_price=book.best_ask_price().unwrap_or_default().as_f64();
+                            log::info!("Received book snapshot for {instrument_id}:{best_bid_price:.3}-{best_ask_price:.3}");
 
                             let data: NautilusData = OrderBookDeltas_API::new(deltas).into();
                             if let Err(e) = ctx.data_sender.send(DataEvent::Data(data)) {
