@@ -18,6 +18,7 @@ use nautilus_core::{
     python::{IntoPyObjectNautilusExt, serialization::from_dict_pyo3},
 };
 use pyo3::{basic::CompareOp, prelude::*, types::PyDict};
+use ustr::Ustr;
 
 use crate::{
     events::OrderCanceled,
@@ -30,7 +31,7 @@ impl OrderCanceled {
     /// Represents an event where an order has been canceled at the trading venue.
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (trader_id, strategy_id, instrument_id, client_order_id, event_id, ts_event, ts_init, reconciliation, venue_order_id=None, account_id=None))]
+    #[pyo3(signature = (trader_id, strategy_id, instrument_id, client_order_id, event_id, ts_event, ts_init, reconciliation, venue_order_id=None, account_id=None, reason=None))]
     fn py_new(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -42,6 +43,7 @@ impl OrderCanceled {
         reconciliation: bool,
         venue_order_id: Option<VenueOrderId>,
         account_id: Option<AccountId>,
+        reason: Option<String>,
     ) -> Self {
         Self::new(
             trader_id,
@@ -55,6 +57,7 @@ impl OrderCanceled {
             venue_order_id,
             account_id,
         )
+        .with_reason(reason.map(|value| Ustr::from(value.as_str())))
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
@@ -116,6 +119,12 @@ impl OrderCanceled {
     }
 
     #[getter]
+    #[pyo3(name = "reason")]
+    fn py_reason(&self) -> Option<String> {
+        self.reason.map(|reason| reason.to_string())
+    }
+
+    #[getter]
     #[pyo3(name = "event_id")]
     fn py_event_id(&self) -> UUID4 {
         self.event_id
@@ -158,6 +167,10 @@ impl OrderCanceled {
         match self.account_id {
             Some(account_id) => dict.set_item("account_id", account_id.to_string())?,
             None => dict.set_item("account_id", py.None())?,
+        }
+        match self.reason {
+            Some(reason) => dict.set_item("reason", reason.to_string())?,
+            None => dict.set_item("reason", py.None())?,
         }
         Ok(dict.into())
     }

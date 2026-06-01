@@ -518,7 +518,6 @@ impl LiveNode {
                         .exec_manager
                         .reconcile_execution_mass_status(mass_status, exec_engine_rc)
                         .await;
-
                     if result.events.is_empty() {
                         log_info!(
                             "Reconciliation for {} succeeded",
@@ -558,6 +557,20 @@ impl LiveNode {
                     log::warn!("Failed to get mass status from {client_id}: {e}");
                 }
             }
+        }
+
+        if self.config.exec_engine.load_cache {
+            log_info!(
+                "Clearing invalid open orders after startup reconciliation...",
+                color = LogColor::Blue
+            );
+
+            let eng_ref = self.kernel.exec_engine.borrow();
+            let clients = eng_ref.get_all_clients();
+            let events = self.exec_manager.clear_invalid_open_orders(&clients).await;
+            drop(clients);
+            drop(eng_ref);
+            self.process_reconciliation_events(&events);
         }
 
         self.kernel.portfolio.borrow_mut().initialize_orders();

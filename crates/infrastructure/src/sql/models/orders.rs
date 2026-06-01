@@ -395,6 +395,9 @@ impl<'r> FromRow<'r, PgRow> for OrderCanceledModel {
         let account_id = row
             .try_get::<Option<&str>, _>("account_id")?
             .map(Into::into);
+        let reason = row
+            .try_get::<Option<&str>, _>("reason")?
+            .map(Ustr::from);
         let order_event = OrderCanceled::new(
             trader_id,
             strategy_id,
@@ -406,7 +409,8 @@ impl<'r> FromRow<'r, PgRow> for OrderCanceledModel {
             reconciliation,
             venue_order_id,
             account_id,
-        );
+        )
+        .with_reason(reason);
         Ok(Self(order_event))
     }
 }

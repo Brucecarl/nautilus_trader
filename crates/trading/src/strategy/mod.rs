@@ -2089,6 +2089,7 @@ mod tests {
             ts_event: UnixNanos::default(),
             ts_init: UnixNanos::default(),
             reconciliation: 0,
+            reason: None,
         });
         strategy.handle_order_event(event);
 

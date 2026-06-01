@@ -50,7 +50,7 @@ use nautilus_execution::{
 };
 use nautilus_model::{
     enums::{OrderSide, OrderStatus, OrderType, TimeInForce},
-    events::{OrderEventAny, OrderFilled, OrderInitialized},
+    events::{OrderCanceled, OrderEventAny, OrderFilled, OrderInitialized},
     identifiers::{
         AccountId, ClientOrderId, InstrumentId, PositionId, StrategyId, TradeId, TraderId,
         VenueOrderId,
@@ -1063,6 +1063,133 @@ impl ExecutionManager {
             for client_order_id in missing_at_venue {
                 events.extend(self.handle_missing_order(client_order_id));
             }
+        }
+
+        events
+    }
+
+    /// Clears locally open orders which are no longer open at the venue.
+    ///
+    /// This is a startup reconciliation sweep where the venue's current open-order
+    /// set is treated as authoritative. It intentionally bypasses the periodic
+    /// open-order check's lookback window, age threshold, and retry counter.
+    pub async fn clear_invalid_open_orders(
+        &mut self,
+        clients: &[&dyn ExecutionClient],
+    ) -> Vec<OrderEventAny> {
+        log::debug!("Clearing locally open orders not present at venue");
+
+        let cached_orders: Vec<OrderAny> = {
+            let cache = self.cache.borrow();
+            let mut orders = cache.orders_open(None, None, None, None, None);
+            orders.extend(cache.orders_inflight(None, None, None, None, None));
+
+            if self.config.reconciliation_instrument_ids.is_empty() {
+                orders.iter().map(|o| (*o).clone()).collect()
+            } else {
+                orders
+                    .iter()
+                    .filter(|o| {
+                        self.config
+                            .reconciliation_instrument_ids
+                            .contains(&o.instrument_id())
+                    })
+                    .map(|o| (*o).clone())
+                    .collect()
+            }
+        };
+
+        if cached_orders.is_empty() {
+            return Vec::new();
+        }
+
+        let ts_now = self.clock.borrow().timestamp_ns();
+        let mut venue_client_order_ids = AHashSet::new();
+        let mut venue_order_ids = AHashSet::new();
+        let mut all_reports = Vec::new();
+
+        for client in clients {
+            let mut cmd = GenerateOrderStatusReports::new(
+                UUID4::new(),
+                ts_now,
+                true, // open_only
+                None, // instrument_id - query all
+                None, // start - do not miss old GTC orders
+                None, // end
+                None, // params
+                None, // correlation_id
+            );
+            cmd.log_receipt_level = LogLevel::Debug;
+
+            match client.generate_order_status_reports(&cmd).await {
+                Ok(reports) => {
+                    for report in reports {
+                        if let Some(client_order_id) = &report.client_order_id {
+                            venue_client_order_ids.insert(*client_order_id);
+                        }
+                        venue_order_ids.insert(report.venue_order_id);
+                        all_reports.push(report);
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to query open order reports from {}: {e}",
+                        client.client_id()
+                    );
+                }
+            }
+        }
+
+        let mut events = Vec::new();
+
+        for report in all_reports {
+            let order = report
+                .client_order_id
+                .as_ref()
+                .and_then(|id| self.get_order(id))
+                .or_else(|| self.get_order_by_venue_order_id(&report.venue_order_id));
+
+            if let Some(order) = order {
+                let instrument = self.get_instrument(&report.instrument_id);
+                if let Some(event) =
+                    self.reconcile_order_report(&order, &report, instrument.as_ref())
+                {
+                    events.push(event);
+                }
+            }
+        }
+
+        for order in cached_orders {
+            let present_at_venue = venue_client_order_ids.contains(&order.client_order_id())
+                || order
+                    .venue_order_id()
+                    .is_some_and(|venue_order_id| venue_order_ids.contains(&venue_order_id));
+
+            if present_at_venue {
+                continue;
+            }
+
+            log::warn!(
+                "Order {} ({:?}) is open locally but not open at venue, marking as CANCELED (NOT_FOUND_AT_VENUE)",
+                order.client_order_id(),
+                order.venue_order_id(),
+            );
+
+            events.push(OrderEventAny::Canceled(OrderCanceled::new(
+                order.trader_id(),
+                order.strategy_id(),
+                order.instrument_id(),
+                order.client_order_id(),
+                UUID4::new(),
+                ts_now,
+                ts_now,
+                true, // reconciliation
+                order.venue_order_id(),
+                order.account_id(),
+            )
+            .with_reason(Some(Ustr::from("NOT_FOUND_AT_VENUE")))));
+
+            self.clear_recon_tracking(&order.client_order_id(), true);
         }
 
         events

@@ -65,6 +65,10 @@ pub struct OrderCanceled {
     /// If the event was generated during reconciliation.
     #[serde(deserialize_with = "from_bool_as_u8")]
     pub reconciliation: u8, // TODO: Change to bool once Cython removed
+    /// The reason the order was canceled.
+    #[serde(default)]
+    #[builder(default)]
+    pub reason: Option<Ustr>,
     /// The venue order ID associated with the event.
     pub venue_order_id: Option<VenueOrderId>,
     /// The account ID associated with the event.
@@ -95,9 +99,17 @@ impl OrderCanceled {
             ts_event,
             ts_init,
             reconciliation: u8::from(reconciliation),
+            reason: None,
             venue_order_id,
             account_id,
         }
+    }
+
+    /// Sets the cancel reason.
+    #[must_use]
+    pub const fn with_reason(mut self, reason: Option<Ustr>) -> Self {
+        self.reason = reason;
+        self
     }
 }
 
@@ -105,7 +117,7 @@ impl Debug for OrderCanceled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}(trader_id={}, strategy_id={}, instrument_id={}, client_order_id={}, venue_order_id={}, account_id={}, event_id={}, ts_event={}, ts_init={})",
+            "{}(trader_id={}, strategy_id={}, instrument_id={}, client_order_id={}, venue_order_id={}, account_id={}, reason={:?}, event_id={}, ts_event={}, ts_init={})",
             stringify!(OrderCanceled),
             self.trader_id,
             self.strategy_id,
@@ -117,6 +129,7 @@ impl Debug for OrderCanceled {
             ),
             self.account_id
                 .map_or_else(|| "None".to_string(), |account_id| format!("{account_id}")),
+            self.reason,
             self.event_id,
             self.ts_event,
             self.ts_init
@@ -128,7 +141,7 @@ impl Display for OrderCanceled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}(instrument_id={}, client_order_id={}, venue_order_id={}, account_id={}, ts_event={})",
+            "{}(instrument_id={}, client_order_id={}, venue_order_id={}, account_id={}, reason={:?}, ts_event={})",
             stringify!(OrderCanceled),
             self.instrument_id,
             self.client_order_id,
@@ -138,6 +151,7 @@ impl Display for OrderCanceled {
                 )),
             self.account_id
                 .map_or("None".to_string(), |account_id| format!("{account_id}")),
+            self.reason,
             self.ts_event
         )
     }
@@ -185,7 +199,7 @@ impl OrderEvent for OrderCanceled {
     }
 
     fn reason(&self) -> Option<Ustr> {
-        None
+        self.reason
     }
 
     fn quantity(&self) -> Option<Quantity> {

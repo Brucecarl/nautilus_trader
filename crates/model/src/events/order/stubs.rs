@@ -489,6 +489,7 @@ impl TestDefault for OrderCanceled {
             ts_event: UnixNanos::default(),
             ts_init: UnixNanos::default(),
             reconciliation: 0,
+            reason: None,
             venue_order_id: None,
             account_id: None,
         }

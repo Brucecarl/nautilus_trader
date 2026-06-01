@@ -2610,6 +2610,7 @@ impl<'a> FromCapnp<'a> for OrderAccepted {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            reason: None,
         })
     }
 }
