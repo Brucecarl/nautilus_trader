@@ -1535,10 +1535,13 @@ impl ExecutionEngine {
             log::debug!("Creating position state snapshot for {position}");
         }
 
-        // let mut position: Position = position.clone();
-        // if let Some(pnl) = self.cache.borrow().calculate_unrealized_pnl(&position) {
-        //     position.unrealized_pnl(last)
-        // }
+        if let Err(e) = self
+            .cache
+            .borrow_mut()
+            .snapshot_position_state(position, Some(false))
+        {
+            log::error!("Failed to snapshot position state: {e}");
+        }
     }
 
     fn handle_event(&mut self, event: &OrderEventAny) {

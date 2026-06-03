@@ -988,8 +988,8 @@ impl CacheDatabaseAdapter for PostgresCacheDatabase {
     }
 
     fn snapshot_position_state(&self, position: &Position) -> anyhow::Result<()> {
-        warn!("snapshot_position_state do nothing");
-        Ok(())
+        let snapshot = PositionSnapshot::from(position, None);
+        self.add_position_snapshot(&snapshot)
     }
 
     fn heartbeat(&self, timestamp: UnixNanos) -> anyhow::Result<()> {

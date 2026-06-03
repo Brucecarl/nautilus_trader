@@ -160,6 +160,9 @@ pub struct LiveExecEngineConfig {
     pub purge_account_events_lookback_mins: Option<u32>,
     /// If purge operations should also delete from the backing database.
     pub purge_from_database: bool,
+    /// If position state snapshots are persisted to a backing database.
+    #[serde(default)]
+    pub snapshot_positions: bool,
     /// The interval (seconds) between auditing own books against public order books.
     pub own_books_audit_interval_secs: Option<f64>,
     /// If the engine should gracefully shutdown when queue processing encounters unexpected errors.
@@ -202,6 +205,7 @@ impl Default for LiveExecEngineConfig {
             purge_account_events_interval_mins: None,
             purge_account_events_lookback_mins: None,
             purge_from_database: false,
+            snapshot_positions: false,
             own_books_audit_interval_secs: None,
             graceful_shutdown_on_error: false,
             qsize: 100_000,
@@ -220,6 +224,7 @@ impl From<LiveExecEngineConfig> for ExecutionEngineConfig {
             purge_account_events_interval_mins: config.purge_account_events_interval_mins,
             purge_account_events_lookback_mins: config.purge_account_events_lookback_mins,
             purge_from_database: config.purge_from_database,
+            snapshot_positions: config.snapshot_positions,
             ..Self::default()
         }
     }
@@ -533,6 +538,7 @@ mod tests {
         assert!(config.open_check_open_only);
         assert_eq!(config.position_check_retries, 3);
         assert!(!config.purge_from_database);
+        assert!(!config.snapshot_positions);
         assert!(!config.graceful_shutdown_on_error);
         assert_eq!(config.qsize, 100_000);
         assert_eq!(config.reconciliation_startup_delay_secs, 10.0);
@@ -542,12 +548,14 @@ mod tests {
     fn test_live_exec_engine_config_into_execution_engine_config_preserves_load_cache() {
         let config = LiveExecEngineConfig {
             load_cache: false,
+            snapshot_positions: true,
             ..Default::default()
         };
 
         let exec_config = ExecutionEngineConfig::from(config);
 
         assert!(!exec_config.load_cache);
+        assert!(exec_config.snapshot_positions);
     }
 
     #[rstest]

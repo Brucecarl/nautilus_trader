@@ -791,4 +791,53 @@ mod serial_tests {
         pg_cache.flush().unwrap();
         pg_cache.close().unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_snapshot_position_state_persists_snapshot() {
+        let mut pg_cache = get_pg_cache_database().await.unwrap();
+
+        let client_order_id = ClientOrderId::new("O-19700101-000000-001-002-1");
+        let instrument = InstrumentAny::CurrencyPair(currency_pair_ethusdt());
+
+        // Add foreign key dependencies: instrument and currencies
+        pg_cache
+            .add_currency(&instrument.base_currency().unwrap())
+            .unwrap();
+        pg_cache.add_currency(&instrument.quote_currency()).unwrap();
+        pg_cache.add_instrument(&instrument).unwrap();
+
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .client_order_id(client_order_id)
+            .instrument_id(instrument.id())
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("1.0"))
+            .build();
+
+        let filled = TestOrderEventStubs::filled(
+            &order,
+            &instrument,
+            Some(TradeId::new("T-19700101-000000-001-001-1")),
+            None,
+            Some(Price::from("100.0")),
+            Some(Quantity::from("1.0")),
+            None,
+            None,
+            None,
+            Some(AccountId::new("SIM-001")),
+        );
+        let position = Position::new(&instrument, filled.into());
+
+        pg_cache.snapshot_position_state(&position).unwrap();
+
+        wait_until(
+            || pg_cache.load_position_snapshot(&position.id).unwrap().is_some(),
+            Duration::from_secs(5),
+        );
+
+        let result = pg_cache.load_position_snapshot(&position.id).unwrap();
+
+        assert_eq!(result.unwrap().position_id, position.id);
+        pg_cache.flush().unwrap();
+        pg_cache.close().unwrap();
+    }
 }

@@ -126,6 +126,13 @@ impl LiveNodeBuilder {
         self
     }
 
+    /// Configure whether to persist position state snapshots.
+    #[must_use]
+    pub const fn with_snapshot_positions(mut self, snapshot_positions: bool) -> Self {
+        self.config.exec_engine.snapshot_positions = snapshot_positions;
+        self
+    }
+
     /// Set the connection timeout in seconds.
     #[must_use]
     pub const fn with_timeout_connection(mut self, timeout_secs: u64) -> Self {
@@ -333,5 +340,19 @@ impl LiveNodeBuilder {
             self.config,
             exec_manager,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_snapshot_position_setters_update_exec_config() {
+        let builder = LiveNodeBuilder::new(TraderId::from("TRADER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_snapshot_positions(true);
+
+        assert!(builder.config.exec_engine.snapshot_positions);
     }
 }
