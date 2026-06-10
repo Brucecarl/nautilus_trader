@@ -28,10 +28,11 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            BookResponse, InstrumentResponse, InstrumentsResponse, RequestBookSnapshot,
-            RequestInstrument, RequestInstruments, RequestTrades, SubscribeBookDeltas,
-            SubscribeInstruments, SubscribeQuotes, SubscribeTrades, TradesResponse,
-            UnsubscribeBookDeltas, UnsubscribeQuotes, UnsubscribeTrades,
+            BarsResponse, BookResponse, InstrumentResponse, InstrumentsResponse,
+            RequestBookSnapshot, RequestBars, RequestInstrument, RequestInstruments,
+            RequestTrades, SubscribeBookDeltas, SubscribeInstruments, SubscribeQuotes,
+            SubscribeTrades, TradesResponse, UnsubscribeBookDeltas, UnsubscribeQuotes,
+            UnsubscribeTrades,
         },
     },
     providers::InstrumentProvider,
@@ -951,6 +952,67 @@ impl DataClient for PolymarketDataClient {
                 }
             } else {
                 log::error!("Instrument {instrument_id} not found on Polymarket");
+            }
+        });
+
+        Ok(())
+    }
+
+    fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
+        let instrument_id = request.bar_type.instrument_id();
+        let instruments = self.instruments.load();
+        let instrument = instruments
+            .get(&instrument_id)
+            .ok_or_else(|| anyhow::anyhow!("Instrument {instrument_id} not found"))?;
+
+        let token_id = instrument.raw_symbol().as_str().to_string();
+        let price_precision = instrument.price_precision();
+        let size_precision = instrument.size_precision();
+
+        let clob_client = self.clob_public_client.clone();
+        let sender = self.data_sender.clone();
+        let client_id = request.client_id.unwrap_or(self.client_id);
+        let request_id = request.request_id;
+        let params = request.params;
+        let clock = self.clock;
+        let start_nanos = datetime_to_unix_nanos(request.start);
+        let end_nanos = datetime_to_unix_nanos(request.end);
+        let bar_type = request.bar_type;
+        let start = request.start;
+        let end = request.end;
+        let limit = request.limit.map(|n| n.get() as usize);
+
+        get_runtime().spawn(async move {
+            match clob_client
+                .request_bars(
+                    &token_id,
+                    bar_type,
+                    price_precision,
+                    size_precision,
+                    start,
+                    end,
+                    limit,
+                )
+                .await
+                .context("failed to request bars from Polymarket CLOB")
+            {
+                Ok(bars) => {
+                    let response = DataResponse::Bars(BarsResponse::new(
+                        request_id,
+                        client_id,
+                        bar_type,
+                        bars,
+                        start_nanos,
+                        end_nanos,
+                        clock.get_time_ns(),
+                        params,
+                    ));
+
+                    if let Err(e) = sender.send(DataEvent::Response(response)) {
+                        log::error!("Failed to send bars response: {e}");
+                    }
+                }
+                Err(e) => log::error!("Bar request failed: {e:?}"),
             }
         });
 

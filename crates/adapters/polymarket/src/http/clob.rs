@@ -15,19 +15,23 @@
 
 //! Provides the HTTP client for the Polymarket CLOB REST API.
 
-use std::{collections::HashMap, result::Result as StdResult, str::from_utf8};
+use std::{collections::HashMap, result::Result as StdResult, str::from_utf8, time::SystemTime};
 
+use anyhow::{Context, bail};
 use nautilus_core::{
     consts::NAUTILUS_USER_AGENT,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
 use nautilus_model::{
+    data::bar::{Bar, BarType},
     data::BookOrder,
-    enums::{BookType, OrderSide},
+    enums::{BarAggregation, BookType, OrderSide},
     identifiers::InstrumentId,
     orderbook::OrderBook,
+    types::{Price, Quantity},
 };
 use nautilus_network::http::{HttpClient, HttpClientError, Method, USER_AGENT};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -40,7 +44,7 @@ use crate::{
     http::{
         error::{Error, Result},
         models::{
-            ClobBookResponse, ClobMarketInfo, PolymarketOpenOrder, PolymarketOrder, PolymarketTradeReport, PriceInterval, PricePoint, TickSizeResponse
+            ClobBookResponse, ClobMarketInfo, PolymarketOpenOrder, PolymarketOrder, PolymarketTradeReport, TickSizeResponse
         },
         query::{
             BalanceAllowance, BatchCancelResponse, CancelMarketOrdersParams, CancelResponse,
@@ -98,6 +102,60 @@ struct BatchPricesHistoryRequestBody<'a> {
 #[derive(Deserialize)]
 struct BatchPricesHistoryResponse {
     history: HashMap<String, Vec<PricePoint>>,
+}
+
+/// Price history aggregation interval for the Data API batch price history endpoint.
+///
+/// Defaults to 1 day when not specified.
+#[derive(Clone, Debug, strum::Display)]
+enum PriceInterval {
+    #[strum(serialize = "max")]
+    Max,
+    #[strum(serialize = "all")]
+    All,
+    /// 1 month
+    #[strum(serialize = "1m")]
+    M1,
+    /// 1 week
+    #[strum(serialize = "1w")]
+    W1,
+    /// 1 day
+    #[strum(serialize = "1d")]
+    D1,
+    /// 6 hours
+    #[strum(serialize = "6h")]
+    H6,
+    /// 1 hour
+    #[strum(serialize = "1h")]
+    H1,
+}
+
+impl PriceInterval {
+    // Accuracy of the data expressed in minutes. Default is 1 minute.
+    pub fn default_fidelity(&self) -> u64 {
+        match self {
+            PriceInterval::Max => 15,
+            PriceInterval::All => 15,
+            PriceInterval::M1 => 15,
+            PriceInterval::W1 => 5,
+            PriceInterval::D1 => 5,
+            PriceInterval::H6 => 1,
+            PriceInterval::H1 => 1,
+        }
+    }
+}
+
+/// A single price point from the Data API batch price history endpoint.
+///
+/// References: <https://docs.polymarket.com/api-reference/markets/get-batch-prices-history>
+#[derive(Clone, Debug, Deserialize)]
+struct PricePoint {
+    /// Unix timestamp in seconds.
+    #[serde(rename = "t")]
+    pub timestamp: i64,
+    /// Price at this timestamp.
+    #[serde(rename = "p")]
+    pub price: f64,
 }
 
 /// Provides an authenticated HTTP client for the Polymarket CLOB REST API.
@@ -621,22 +679,25 @@ impl PolymarketClobPublicClient {
     /// timestamps are omitted. `interval` defaults to 1 day if `None`.
     ///
     /// References: <https://docs.polymarket.com/api-reference/markets/get-batch-prices-history>
-    pub async fn price_history(
+    async fn price_history(
         &self,
         markets: &[String],
         start_ts: Option<u64>,
         end_ts: Option<u64>,
-        interval: Option<PriceInterval>,
+        interval: Option<PriceInterval>,//set this to None to get all data in start_ts and end_ts
         fidelity:Option<u64>,//1min,5min,15,min
-    ) -> Result<HashMap<String, Vec<PricePoint>>> {
-        let interval = interval.unwrap_or(PriceInterval::D1);
-        let fidelity=fidelity.unwrap_or(interval.default_fidelity());
+    ) -> anyhow::Result<HashMap<String, Vec<PricePoint>>> {
+        if start_ts.is_none()&&end_ts.is_none()&&interval.is_none(){
+            bail!("one of start_ts|end_ts|interval should be provided");
+        }
+
+        let fidelity=fidelity.unwrap_or(interval.as_ref().map(|v|v.default_fidelity()).unwrap_or(1));
 
         let body = BatchPricesHistoryRequestBody {
             markets,
             start_ts,
             end_ts,
-            interval: Some(interval.to_string()),
+            interval:interval.map(|v|v.to_string()),
             fidelity:Some(fidelity),
         };
         let body_bytes = serde_json::to_vec(&body).map_err(Error::Serde)?;
@@ -656,9 +717,147 @@ impl PolymarketClobPublicClient {
             Err(Error::from_status_code(
                 response.status.as_u16(),
                 &response.body,
-            ))
+            )).context("response error:")
         }
     }
+
+    /// Fetches historical bars (OHLCV) using the batch price history endpoint.
+    ///
+    /// Uses `interval=all` to fetch raw price points from the full requested
+    /// time range, sub-sampled at `fidelity` (minutes). Points are then grouped
+    /// into bar windows aligned to the bar specification and aggregated into
+    /// OHLC bars. Volume is not available from Polymarket and set to zero.
+    /// Only time-based aggregations (Minute, Hour, Day) are supported.
+    pub async fn request_bars(
+        &self,
+        token_id: &str,
+        bar_type: BarType,
+        price_precision: u8,
+        size_precision: u8,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<Bar>> {
+        let spec = bar_type.spec();
+        // Determine sub-sampling fidelity and bar-window alignment
+        let (fidelity, window_secs) = match spec.aggregation {
+            BarAggregation::Minute => (1, (spec.step.get() * 60) as u64),
+            BarAggregation::Hour => (10, (spec.step.get() * 3600) as u64),  // 10 minutes sub-sampling
+            BarAggregation::Day => (60, (spec.step.get() * 86400) as u64),  // hourly sub-sampling
+            _ => {
+                log::warn!(
+                    "Unsupported bar aggregation {:?} for Polymarket price history",
+                    spec.aggregation
+                );
+                return Ok(Vec::new());
+            }
+        };
+
+        let start_ts = start.map(|t| t.timestamp() as u64);
+        let end_ts = end.map(|t| t.timestamp() as u64);
+
+        let mut history = self
+            .price_history(
+                &[token_id.to_string()],
+                start_ts,
+                end_ts,
+                None,
+                Some(fidelity),
+            )
+            .await?;
+
+        let points = match history.remove(token_id) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+
+        let ts_init = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        // Group points into bar windows and compute OHLC
+        let mut bars: Vec<Bar> = Vec::new();
+        let mut window_points: Vec<f64> = Vec::new();
+        let mut current_window: Option<u64> = None;
+
+        for point in points {
+            let ts_secs = point.timestamp as u64;
+            let bar_start = (ts_secs / window_secs) * window_secs;
+
+            match current_window {
+                Some(w) if w == bar_start => {
+                    window_points.push(point.price);
+                }
+                Some(w) => {
+                    // Emit completed bar
+                    aggregate_and_push(
+                        &mut bars, &bar_type, &window_points, price_precision,
+                        size_precision, w, ts_init, limit,
+                    );
+                    window_points.clear();
+                    window_points.push(point.price);
+                    current_window = Some(bar_start);
+                }
+                None => {
+                    window_points.push(point.price);
+                    current_window = Some(bar_start);
+                }
+            }
+        }
+
+        // Emit last bar
+        if let Some(w) = current_window {
+            aggregate_and_push(
+                &mut bars, &bar_type, &window_points, price_precision,
+                size_precision, w, ts_init, limit,
+            );
+        }
+
+        Ok(bars)
+    }
+}
+
+/// Aggregate a bar window's price points into an OHLC bar and push to `bars`.
+/// Respects `limit` by skipping the push when already reached.
+fn aggregate_and_push(
+    bars: &mut Vec<Bar>,
+    bar_type: &BarType,
+    window_points: &[f64],
+    price_precision: u8,
+    size_precision: u8,
+    window_start_secs: u64,
+    ts_init: u64,
+    limit: Option<usize>,
+) {
+    if window_points.is_empty() {
+        return;
+    }
+
+    // Check limit (already at or past limit → skip)
+    if let Some(lim) = limit
+        && bars.len() >= lim
+    {
+        return;
+    }
+
+    let open = window_points[0];
+    let close = *window_points.last().unwrap();
+    let high = window_points.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let low = window_points.iter().cloned().fold(f64::INFINITY, f64::min);
+
+    let ts_event_ns = window_start_secs * 1_000_000_000;
+
+    bars.push(Bar::new(
+        *bar_type,
+        Price::new(open, price_precision),
+        Price::new(high, price_precision),
+        Price::new(low, price_precision),
+        Price::new(close, price_precision),
+        Quantity::zero(size_precision),
+        ts_event_ns.into(),
+        ts_init.into(),
+    ));
 }
 
 #[cfg(test)]
@@ -755,8 +954,55 @@ use nautilus_model::{
     #[ignore = "connect clob"]
     async fn test_price_history(){
         let client=PolymarketClobPublicClient::new(None, None).unwrap();
-        let history=client.price_history(&["7773690994834111725742505316101987766894598058473643503939677008623849288002".to_string()], None, None, None, None).await.unwrap();
-        println!("{:?}",history);
+        let now = Utc::now();
+        let start = now - chrono::Duration::hours(1);
+        let history=client.price_history(&["7773690994834111725742505316101987766894598058473643503939677008623849288002".to_string()], Some(start.timestamp() as u64), Some(now.timestamp() as u64), None, Some(30)).await.unwrap();
+        let res=history.get("7773690994834111725742505316101987766894598058473643503939677008623849288002");
+        if let Some(list)=res{
+            println!("{}={:?}",list.len(),list);
+        }
     }
 
+    #[tokio::test]
+    #[ignore = "connect clob"]
+    async fn test_request_bars() {
+        use nautilus_model::{
+            data::bar::BarSpecification,
+            enums::{AggregationSource, PriceType},
+        };
+
+        let client = PolymarketClobPublicClient::new(None, None).unwrap();
+        let token = "7773690994834111725742505316101987766894598058473643503939677008623849288002";
+        let now = Utc::now();
+        let start = now - chrono::Duration::hours(6);
+
+        let spec = BarSpecification::new(1, 
+            BarAggregation::Hour, PriceType::Last);
+        let bar_type = BarType::new(
+            InstrumentId::from("TEST-TOKEN.POLYMARKET"),
+            spec,
+            AggregationSource::External,
+        );
+
+        let bars = client
+            .request_bars(token, bar_type, 4, 0, Some(start), Some(now), None)
+            .await
+            .unwrap();
+
+        println!("=== 1-Hour bars (6h range) ===");
+        println!("Received {} bars", bars.len());
+        for bar in &bars {
+            let secs = bar.ts_event.as_u64() / 1_000_000_000;
+            let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap();
+            println!(
+                "  {}  open={} high={} low={} close={} vol={}",
+                dt.format("%Y-%m-%d %H:%M"),
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+            );
+        }
+    }
 }

@@ -377,60 +377,6 @@ pub struct ClobMarketInfo {
     pub mos: String,
 }
 
-/// A single price point from the Data API batch price history endpoint.
-///
-/// References: <https://docs.polymarket.com/api-reference/markets/get-batch-prices-history>
-#[derive(Clone, Debug, Deserialize)]
-pub struct PricePoint {
-    /// Unix timestamp in seconds.
-    #[serde(rename = "t")]
-    pub timestamp: i64,
-    /// Price at this timestamp.
-    #[serde(rename = "p")]
-    pub price: f64,
-}
-
-/// Price history aggregation interval for the Data API batch price history endpoint.
-///
-/// Defaults to 1 day when not specified.
-#[derive(Clone, Debug, strum::Display)]
-pub enum PriceInterval {
-    #[strum(serialize = "max")]
-    Max,
-    #[strum(serialize = "all")]
-    All,
-    /// 1 month
-    #[strum(serialize = "1m")]
-    M1,
-    /// 1 week
-    #[strum(serialize = "1w")]
-    W1,
-    /// 1 day
-    #[strum(serialize = "1d")]
-    D1,
-    /// 6 hours
-    #[strum(serialize = "6h")]
-    H6,
-    /// 1 hour
-    #[strum(serialize = "1h")]
-    H1,
-}
-
-impl PriceInterval {
-    // Accuracy of the data expressed in minutes. Default is 1 minute.
-    pub fn default_fidelity(&self) -> u64 {
-        match self {
-            PriceInterval::Max => 15,
-            PriceInterval::All => 15,
-            PriceInterval::M1 => 15,
-            PriceInterval::W1 => 5,
-            PriceInterval::D1 => 5,
-            PriceInterval::H6 => 1,
-            PriceInterval::H1 => 1,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
