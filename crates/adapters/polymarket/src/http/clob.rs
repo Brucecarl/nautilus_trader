@@ -28,15 +28,19 @@ use nautilus_model::{
     orderbook::OrderBook,
 };
 use nautilus_network::http::{HttpClient, HttpClientError, Method, USER_AGENT};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    common::{consts::CHAIN_ID, credential::Credential, enums::PolymarketOrderType, urls::clob_http_url},
+    common::{
+        consts::CHAIN_ID,
+        credential::Credential,
+        enums::PolymarketOrderType,
+        urls::clob_http_url,
+    },
     http::{
         error::{Error, Result},
         models::{
-            ClobBookResponse, ClobMarketInfo, PolymarketOpenOrder, PolymarketOrder,
-            PolymarketTradeReport, TickSizeResponse,
+            ClobBookResponse, ClobMarketInfo, PolymarketOpenOrder, PolymarketOrder, PolymarketTradeReport, PriceInterval, PricePoint, TickSizeResponse
         },
         query::{
             BalanceAllowance, BatchCancelResponse, CancelMarketOrdersParams, CancelResponse,
@@ -74,6 +78,26 @@ struct PostOrderBody<'a> {
 struct CancelOrderBody<'a> {
     #[serde(rename = "orderID")]
     order_id: &'a str,
+}
+
+/// Request body for `POST /batch-prices-history`.
+#[derive(Serialize)]
+struct BatchPricesHistoryRequestBody<'a> {
+    markets: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_ts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_ts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interval: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fidelity: Option<u64>,
+}
+
+/// Response wrapper for `POST /batch-prices-history`.
+#[derive(Deserialize)]
+struct BatchPricesHistoryResponse {
+    history: HashMap<String, Vec<PricePoint>>,
 }
 
 /// Provides an authenticated HTTP client for the Polymarket CLOB REST API.
@@ -588,11 +612,59 @@ impl PolymarketClobPublicClient {
 
         Ok(book)
     }
+
+    /// Fetches batch price history for one or more markets from the CLOB API.
+    ///
+    /// Makes a `POST /batch-prices-history` request with the given market condition IDs
+    /// and optional time range, interval, and fidelity parameters.
+    /// Only `markets` is required; the API returns all available data when start/end
+    /// timestamps are omitted. `interval` defaults to 1 day if `None`.
+    ///
+    /// References: <https://docs.polymarket.com/api-reference/markets/get-batch-prices-history>
+    pub async fn price_history(
+        &self,
+        markets: &[String],
+        start_ts: Option<u64>,
+        end_ts: Option<u64>,
+        interval: Option<PriceInterval>,
+        fidelity:Option<u64>,//1min,5min,15,min
+    ) -> Result<HashMap<String, Vec<PricePoint>>> {
+        let interval = interval.unwrap_or(PriceInterval::D1);
+        let fidelity=fidelity.unwrap_or(interval.default_fidelity());
+
+        let body = BatchPricesHistoryRequestBody {
+            markets,
+            start_ts,
+            end_ts,
+            interval: Some(interval.to_string()),
+            fidelity:Some(fidelity),
+        };
+        let body_bytes = serde_json::to_vec(&body).map_err(Error::Serde)?;
+
+        let url = format!("{}/batch-prices-history", self.base_url);
+        let response = self
+            .client
+            .request(Method::POST, url, None, None, Some(body_bytes), None, None)
+            .await
+            .map_err(Error::from_http_client)?;
+
+        if response.status.is_success() {
+            let resp: BatchPricesHistoryResponse =
+                serde_json::from_slice(&response.body).map_err(Error::Serde)?;
+            Ok(resp.history)
+        } else {
+            Err(Error::from_status_code(
+                response.status.as_u16(),
+                &response.body,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{
+    use chrono::Utc;
+use nautilus_model::{
         enums::{BookType, OrderSide},
         identifiers::InstrumentId,
         types::{Price, Quantity},
@@ -679,4 +751,12 @@ mod tests {
         assert!(book.best_bid_price().is_none());
         assert!(book.best_ask_price().is_none());
     }
+    #[tokio::test]
+    #[ignore = "connect clob"]
+    async fn test_price_history(){
+        let client=PolymarketClobPublicClient::new(None, None).unwrap();
+        let history=client.price_history(&["7773690994834111725742505316101987766894598058473643503939677008623849288002".to_string()], None, None, None, None).await.unwrap();
+        println!("{:?}",history);
+    }
+
 }
