@@ -15,12 +15,13 @@
 
 //! Live market data client implementation for the Polymarket adapter.
 
-use std::sync::{
+use std::{collections::HashMap, sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-};
+}};
 
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nautilus_common::{
     clients::DataClient,
@@ -30,9 +31,9 @@ use nautilus_common::{
         data::{
             BarsResponse, BookResponse, InstrumentResponse, InstrumentsResponse,
             RequestBookSnapshot, RequestBars, RequestInstrument, RequestInstruments,
-            RequestTrades, SubscribeBookDeltas, SubscribeInstruments, SubscribeQuotes,
-            SubscribeTrades, TradesResponse, UnsubscribeBookDeltas, UnsubscribeQuotes,
-            UnsubscribeTrades,
+            RequestTrades, SubscribeBars, SubscribeBookDeltas, SubscribeInstruments,
+            SubscribeQuotes, SubscribeTrades, TradesResponse, UnsubscribeBars,
+            UnsubscribeBookDeltas, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
     providers::InstrumentProvider,
@@ -43,8 +44,9 @@ use nautilus_core::{
     time::{AtomicTime, get_atomic_clock_realtime},
 };
 use nautilus_model::{
+    data::bar::BarSpecification,
     data::{Data as NautilusData, InstrumentStatus, OrderBookDeltas_API, QuoteTick, bet},
-    enums::{BookType, MarketStatusAction},
+    enums::{BarAggregation, BookType, MarketStatusAction},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     orderbook::OrderBook,
@@ -123,6 +125,7 @@ pub struct PolymarketDataClient {
     active_quote_subs: Arc<AtomicSet<InstrumentId>>,
     active_delta_subs: Arc<AtomicSet<InstrumentId>>,
     active_trade_subs: Arc<AtomicSet<InstrumentId>>,
+    active_bar_subs: Arc<DashMap<BarSpecification, Vec<InstrumentId>>>,
 }
 
 impl PolymarketDataClient {
@@ -157,6 +160,7 @@ impl PolymarketDataClient {
             active_quote_subs: Arc::new(AtomicSet::new()),
             active_delta_subs: Arc::new(AtomicSet::new()),
             active_trade_subs: Arc::new(AtomicSet::new()),
+            active_bar_subs: Arc::new(DashMap::new()),
         }
     }
 
@@ -731,6 +735,145 @@ impl PolymarketDataClient {
             let _ = tokio::time::timeout(timeout, handle).await;
         }
     }
+    fn spawn_bar_polling_task(&mut self, spec: BarSpecification) {
+        let subs = self.active_bar_subs.clone();
+        let clob = self.clob_public_client.clone();
+        let sender = self.data_sender.clone();
+        let cancellation = self.cancellation_token.clone();
+        let cfg_lookback_hours=self.config.bar_lookback_hours.clone();
+
+        let handle = get_runtime().spawn(async move {
+            let interval = match spec.aggregation {
+                BarAggregation::Minute => tokio::time::Duration::from_secs(30),
+                BarAggregation::Hour => tokio::time::Duration::from_mins(30),
+                BarAggregation::Day => tokio::time::Duration::from_hours(1),
+                _ => tokio::time::Duration::from_hours(1),
+            };
+            let mut update_timer = tokio::time::interval(interval);
+            update_timer.tick().await; // skip immediate tick, first regular tick fires after interval
+            let mut init_timer=tokio::time::interval(tokio::time::Duration::from_secs(10));
+            let mut init_ids:HashMap<InstrumentId, u64>=HashMap::with_capacity(10);
+            log::info!("Spawn bar polling:{spec:?},interval={interval:?}");
+
+            loop {
+                tokio::select! {
+                    //init_timer responsible init fetch full history bars and them kick them to the update timer
+                    _=init_timer.tick()=>{
+                        let instrument_ids: Vec<InstrumentId> = match subs.get(&spec) {
+                            Some(entry) => entry.value().clone(),
+                            None => continue,
+                        };
+                        let not_init=instrument_ids.iter().filter(|v|!init_ids.contains_key(v)).cloned().collect::<Vec<_>>();
+                        if not_init.is_empty(){
+                            continue;
+                        }
+                        let lookback = if let Some(lookback_hours)=cfg_lookback_hours{
+                            chrono::Duration::hours(lookback_hours as i64)
+                        }else{
+                            get_bar_lookback(spec, true)
+                        };
+                        let start = Utc::now() - lookback;
+                        let end = Utc::now();
+                        log::debug!("Request bars init:spec={spec:?},ids_total={},start={start},end={end}",not_init.len());
+
+                        match clob.request_bars(&not_init, spec, Some(start), Some(end)).await{
+                            Ok(history) => {
+                                for (token_id,bars) in history.iter() {
+                                    if bars.is_empty(){
+                                        continue;
+                                    }
+                                    log::debug!("Request bars init success:spec={spec:?},id={token_id},total={}",bars.len());
+                                    for bar in bars {
+                                        if let Err(e) = sender.send(DataEvent::Data(NautilusData::Bar(bar.clone()))){
+                                            log::error!("Failed to emit bar: {e}");
+                                        }
+                                    }
+                                    let inst_id=bars.first().map(|v|v.bar_type.instrument_id()).unwrap();
+                                    let ts=bars.iter().max_by_key(|v|v.ts_event).map(|v|v.ts_event.as_u64()).unwrap_or_default();
+                                    init_ids.insert(inst_id, ts);
+                                    
+                                }
+                            },
+                            Err(e) => log::error!("Bar batch polling failed for spec={spec:?}: {e:?}"),
+                        }
+
+                    }
+                    //update_timer responsible for increment updates of bars
+                    _ = update_timer.tick() => {
+                        // Sync active subscription IDs with init_ids
+                        let current_ids = match subs.get(&spec) {
+                            Some(entry) => entry,
+                            None => {
+                                init_ids.clear();
+                                continue;
+                            }
+                        };
+                        init_ids.retain(|id, _| current_ids.contains(id));
+                        drop(current_ids);
+
+                        let instrument_ids: Vec<InstrumentId> = init_ids.keys().cloned().collect();
+                        if instrument_ids.is_empty(){
+                            continue;
+                        }
+
+                        let lookback = get_bar_lookback(spec, false);
+                        let start = Utc::now() - lookback;
+                        let end = Utc::now();
+                        log::debug!("Request bars:spec={spec:?},start={start},end={end}");
+                        match clob.request_bars(&instrument_ids, spec, Some(start), Some(end)).await
+                        {
+                            Ok(history) => {
+                                for (token_id,bars) in history.iter() {
+                                    if bars.is_empty(){
+                                        continue;
+                                    }
+                                    log::info!("Request bars success:spec={spec:?},id={token_id},total={}",bars.len());
+                                    let inst_id=bars.first().map(|v|v.bar_type.instrument_id()).unwrap();
+                                    let last = init_ids.get(&inst_id).cloned().unwrap_or_default();
+                                    for bar in bars {
+                                        let ts = bar.ts_event.as_u64();
+                                        if ts >= last {
+                                            if let Err(e) = sender.send(DataEvent::Data(NautilusData::Bar(bar.clone()))){
+                                                log::error!("Failed to emit bar: {e}");
+                                            }
+                                        }
+                                    }
+                                    let ts=bars.iter().max_by_key(|v|v.ts_event).map(|v|v.ts_event.as_u64()).unwrap_or_default();
+                                    init_ids.insert(inst_id, ts);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Bar batch polling failed for spec={spec:?}: {e:?}");
+                            }
+                        }
+                    }
+                    () = cancellation.cancelled() => break,
+                }
+            }
+        });
+        self.tasks.push(handle);
+    }
+}
+
+fn get_first_bar_lookback(spec: BarSpecification) -> chrono::Duration {
+    match spec.aggregation {
+        BarAggregation::Minute => chrono::Duration::hours(6),
+        BarAggregation::Hour => chrono::Duration::hours(24),
+        BarAggregation::Day => chrono::Duration::days(3),
+        _ => chrono::Duration::hours(1),
+    }
+}
+fn get_bar_lookback(spec: BarSpecification, is_init: bool) -> chrono::Duration {
+    if is_init {
+        get_first_bar_lookback(spec)
+    } else {
+        match spec.aggregation {
+            BarAggregation::Minute => chrono::Duration::minutes(spec.step.get() as i64),
+            BarAggregation::Hour => chrono::Duration::hours(spec.step.get() as i64),
+            BarAggregation::Day => chrono::Duration::days(spec.step.get() as i64),
+            _ => chrono::Duration::hours(1),
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -966,8 +1109,6 @@ impl DataClient for PolymarketDataClient {
             .ok_or_else(|| anyhow::anyhow!("Instrument {instrument_id} not found"))?;
 
         let token_id = instrument.raw_symbol().as_str().to_string();
-        let price_precision = instrument.price_precision();
-        let size_precision = instrument.size_precision();
 
         let clob_client = self.clob_public_client.clone();
         let sender = self.data_sender.clone();
@@ -980,23 +1121,20 @@ impl DataClient for PolymarketDataClient {
         let bar_type = request.bar_type;
         let start = request.start;
         let end = request.end;
-        let limit = request.limit.map(|n| n.get() as usize);
 
         get_runtime().spawn(async move {
             match clob_client
                 .request_bars(
-                    &token_id,
-                    bar_type,
-                    price_precision,
-                    size_precision,
+                    &[instrument_id],
+                    bar_type.spec(),
                     start,
                     end,
-                    limit,
                 )
                 .await
                 .context("failed to request bars from Polymarket CLOB")
             {
-                Ok(bars) => {
+                Ok(history) => {
+                    let bars = history.into_values().flatten().collect::<Vec<_>>();
                     let response = DataResponse::Bars(BarsResponse::new(
                         request_id,
                         client_id,
@@ -1238,6 +1376,46 @@ impl DataClient for PolymarketDataClient {
         }
 
         log::debug!("Unsubscribed from trades for {instrument_id}");
+        Ok(())
+    }
+
+    fn subscribe_bars(&mut self, cmd: &SubscribeBars) -> anyhow::Result<()> {
+        let bar_type = cmd.bar_type;
+        let instrument_id = bar_type.instrument_id();
+        let _ = self.resolve_token_id(instrument_id)?;
+        let spec = bar_type.spec();
+
+        let is_new=!self.active_bar_subs.contains_key(&spec);
+        {
+            let mut entry=self.active_bar_subs.entry(spec).or_default();
+            if !entry.contains(&instrument_id){
+                entry.push(instrument_id);
+            }
+        }
+
+        // Start a per-spec polling task on first subscription for this spec
+        if is_new {
+            self.spawn_bar_polling_task(spec);
+        }
+
+        log::debug!("Subscribed to bars for {bar_type}");
+        Ok(())
+    }
+
+    fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
+        let bar_type = cmd.bar_type;
+        let instrument_id = bar_type.instrument_id();
+        let spec = bar_type.spec();
+
+        if let Some(mut entry) = self.active_bar_subs.get_mut(&spec) {
+            entry.retain(|id| *id != instrument_id);
+            if entry.is_empty() {
+                drop(entry);
+                self.active_bar_subs.remove(&spec);
+            }
+        }
+
+        log::debug!("Unsubscribed from bars for {bar_type}");
         Ok(())
     }
 }

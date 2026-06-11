@@ -94,6 +94,10 @@ impl PolymarketLabel {
     }
 }
 
+pub fn resolve_token_id(instrument_id: &InstrumentId)->String{
+    instrument_id.symbol.to_string().split("-").last().unwrap().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

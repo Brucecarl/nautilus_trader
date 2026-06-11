@@ -53,6 +53,8 @@ pub struct PolymarketDataClientConfig {
     pub filters: Vec<Arc<dyn InstrumentFilter>>,
     /// Optional filter applied to newly discovered markets before instrument emission.
     pub new_market_filter: Option<Arc<dyn InstrumentFilter>>,
+    /// lookback hours to fetch the bars,used when initiating bars
+    pub bar_lookback_hours:Option<u64>,
 }
 
 impl Clone for PolymarketDataClientConfig {
@@ -69,6 +71,7 @@ impl Clone for PolymarketDataClientConfig {
             subscribe_new_markets: self.subscribe_new_markets,
             filters: self.filters.clone(),
             new_market_filter: self.new_market_filter.clone(),
+            bar_lookback_hours:self.bar_lookback_hours.clone()
         }
     }
 }
@@ -108,6 +111,7 @@ impl Default for PolymarketDataClientConfig {
             subscribe_new_markets: false,
             filters: Vec::new(),
             new_market_filter: None,
+            bar_lookback_hours:None
         }
     }
 }

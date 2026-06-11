@@ -15,13 +15,16 @@
 
 //! Provides the HTTP client for the Polymarket CLOB REST API.
 
+use std::sync::Arc;
 use std::{collections::HashMap, result::Result as StdResult, str::from_utf8, time::SystemTime};
 
 use anyhow::{Context, bail};
+use futures_util::{StreamExt, stream};
 use nautilus_core::{
     consts::NAUTILUS_USER_AGENT,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
+use nautilus_model::data::BarSpecification;
 use nautilus_model::{
     data::bar::{Bar, BarType},
     data::BookOrder,
@@ -34,6 +37,7 @@ use nautilus_network::http::{HttpClient, HttpClientError, Method, USER_AGENT};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::common::models::resolve_token_id;
 use crate::{
     common::{
         consts::CHAIN_ID,
@@ -67,6 +71,7 @@ const PATH_POST_ORDER: &str = "/order";
 const PATH_POST_ORDERS: &str = "/orders";
 const PATH_CANCEL_ALL: &str = "/cancel-all";
 const PATH_CANCEL_MARKET_ORDERS: &str = "/cancel-market-orders";
+const CONCURRENCY:usize=4;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -721,100 +726,135 @@ impl PolymarketClobPublicClient {
         }
     }
 
+    
+    pub async fn request_bars(
+        &self,
+        instrument_ids: &[InstrumentId],
+        spec:BarSpecification,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<HashMap<String, Vec<Bar>>>{
+        const MAX_BATCH: usize = 20;
+        let me = Arc::new(self.clone());
+        let chunks: Vec<Vec<_>> = instrument_ids.chunks(MAX_BATCH).map(|c| c.to_vec()).collect();
+        let results: Vec<anyhow::Result<HashMap<String, Vec<Bar>>>> = stream::iter(
+            chunks.into_iter().map(|chunk| {
+                let me = Arc::clone(&me);
+                async move { me.request_bars_chunk(&chunk, spec, start, end).await }
+            }),
+        )
+        .buffer_unordered(CONCURRENCY)
+        .collect()
+        .await;
+
+        let mut mm = HashMap::with_capacity(instrument_ids.len());
+        for res in results {
+            mm.extend(res?);
+        }
+        Ok(mm)
+    }
+
     /// Fetches historical bars (OHLCV) using the batch price history endpoint.
     ///
+    /// Accepts up to 20 token IDs in a single call (Polymarket API limit).
     /// Uses `interval=all` to fetch raw price points from the full requested
     /// time range, sub-sampled at `fidelity` (minutes). Points are then grouped
     /// into bar windows aligned to the bar specification and aggregated into
     /// OHLC bars. Volume is not available from Polymarket and set to zero.
     /// Only time-based aggregations (Minute, Hour, Day) are supported.
-    pub async fn request_bars(
+    pub async fn request_bars_chunk(
         &self,
-        token_id: &str,
-        bar_type: BarType,
-        price_precision: u8,
-        size_precision: u8,
+        instrument_ids: &[InstrumentId],
+        spec:BarSpecification,
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<Bar>> {
-        let spec = bar_type.spec();
+    ) -> anyhow::Result<HashMap<String, Vec<Bar>>> {
+        if instrument_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let token_ids=instrument_ids.iter().map(|id|resolve_token_id(id)).collect::<Vec<_>>();
+
+        // let spec = bar_type.spec();
         // Determine sub-sampling fidelity and bar-window alignment
         let (fidelity, window_secs) = match spec.aggregation {
             BarAggregation::Minute => (1, (spec.step.get() * 60) as u64),
-            BarAggregation::Hour => (10, (spec.step.get() * 3600) as u64),  // 10 minutes sub-sampling
+            BarAggregation::Hour => (10, (spec.step.get() * 3600) as u64),
             BarAggregation::Day => (60, (spec.step.get() * 86400) as u64),  // hourly sub-sampling
             _ => {
                 log::warn!(
                     "Unsupported bar aggregation {:?} for Polymarket price history",
                     spec.aggregation
                 );
-                return Ok(Vec::new());
+                return Ok(HashMap::new());
             }
         };
 
         let start_ts = start.map(|t| t.timestamp() as u64);
         let end_ts = end.map(|t| t.timestamp() as u64);
+        const MAX_BATCH: usize = 20;
 
-        let mut history = self
-            .price_history(
-                &[token_id.to_string()],
-                start_ts,
-                end_ts,
-                None,
-                Some(fidelity),
-            )
-            .await?;
-
-        let points = match history.remove(token_id) {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
-        };
+        // Batch API calls (max 20 per request)
+        let mut history: HashMap<String, Vec<PricePoint>> = HashMap::new();
+        for chunk in token_ids.chunks(MAX_BATCH) {
+            let chunk_result = self
+                .price_history(chunk, start_ts, end_ts, None, Some(fidelity))
+                .await?;
+            history.extend(chunk_result);
+        }
 
         let ts_init = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
 
-        // Group points into bar windows and compute OHLC
-        let mut bars: Vec<Bar> = Vec::new();
-        let mut window_points: Vec<f64> = Vec::new();
-        let mut current_window: Option<u64> = None;
+        let mut result: HashMap<String, Vec<Bar>> = HashMap::new();
 
-        for point in points {
-            let ts_secs = point.timestamp as u64;
-            let bar_start = (ts_secs / window_secs) * window_secs;
+        for (i,token_id) in token_ids.iter().enumerate() {
+            let points = match history.get(token_id) {
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
+            };
 
-            match current_window {
-                Some(w) if w == bar_start => {
-                    window_points.push(point.price);
-                }
-                Some(w) => {
-                    // Emit completed bar
-                    aggregate_and_push(
-                        &mut bars, &bar_type, &window_points, price_precision,
-                        size_precision, w, ts_init, limit,
-                    );
-                    window_points.clear();
-                    window_points.push(point.price);
-                    current_window = Some(bar_start);
-                }
-                None => {
-                    window_points.push(point.price);
-                    current_window = Some(bar_start);
+            let mut bars: Vec<Bar> = Vec::new();
+            let mut window_points: Vec<f64> = Vec::new();
+            let mut current_window: Option<u64> = None;
+            let bar_type=BarType::Standard { instrument_id:instrument_ids[i], spec, aggregation_source: nautilus_model::enums::AggregationSource::External };
+
+            for point in points {
+                let ts_secs = point.timestamp as u64;
+                let bar_start = (ts_secs / window_secs) * window_secs;
+
+                match current_window {
+                    Some(w) if w == bar_start => {
+                        window_points.push(point.price);
+                    }
+                    Some(w) => {
+                        aggregate_and_push(
+                            &mut bars, &bar_type, &window_points, 4,
+                            2, w, ts_init,
+                        );
+                        window_points.clear();
+                        window_points.push(point.price);
+                        current_window = Some(bar_start);
+                    }
+                    None => {
+                        window_points.push(point.price);
+                        current_window = Some(bar_start);
+                    }
                 }
             }
+
+            if let Some(w) = current_window {
+                aggregate_and_push(
+                    &mut bars, &bar_type, &window_points, 4,
+                    2, w, ts_init,
+                );
+            }
+
+            result.insert(token_id.clone(), bars);
         }
 
-        // Emit last bar
-        if let Some(w) = current_window {
-            aggregate_and_push(
-                &mut bars, &bar_type, &window_points, price_precision,
-                size_precision, w, ts_init, limit,
-            );
-        }
-
-        Ok(bars)
+        Ok(result)
     }
 }
 
@@ -828,16 +868,8 @@ fn aggregate_and_push(
     size_precision: u8,
     window_start_secs: u64,
     ts_init: u64,
-    limit: Option<usize>,
 ) {
     if window_points.is_empty() {
-        return;
-    }
-
-    // Check limit (already at or past limit → skip)
-    if let Some(lim) = limit
-        && bars.len() >= lim
-    {
         return;
     }
 
@@ -968,28 +1000,26 @@ use nautilus_model::{
     async fn test_request_bars() {
         use nautilus_model::{
             data::bar::BarSpecification,
-            enums::{AggregationSource, PriceType},
+            enums::{PriceType},
         };
 
         let client = PolymarketClobPublicClient::new(None, None).unwrap();
-        let token = "7773690994834111725742505316101987766894598058473643503939677008623849288002";
+        let instrument_id = InstrumentId::from("0x785df65c37d72ac79b34bd8956811c8569c47287580ac38cc039ca92cbcbb397-7773690994834111725742505316101987766894598058473643503939677008623849288002.POLYMARKET");
         let now = Utc::now();
         let start = now - chrono::Duration::hours(6);
+        println!("token id:{}",resolve_token_id(&instrument_id));
 
         let spec = BarSpecification::new(1, 
             BarAggregation::Hour, PriceType::Last);
-        let bar_type = BarType::new(
-            InstrumentId::from("TEST-TOKEN.POLYMARKET"),
-            spec,
-            AggregationSource::External,
-        );
 
-        let bars = client
-            .request_bars(token, bar_type, 4, 0, Some(start), Some(now), None)
+        let result = client
+            .request_bars(&[instrument_id], spec, Some(start), Some(now))
             .await
             .unwrap();
 
-        println!("=== 1-Hour bars (6h range) ===");
+        let bars = result.into_values().flatten().collect::<Vec<_>>();
+
+        println!("=== 5-Minute bars (6h range) ===");
         println!("Received {} bars", bars.len());
         for bar in &bars {
             let secs = bar.ts_event.as_u64() / 1_000_000_000;
